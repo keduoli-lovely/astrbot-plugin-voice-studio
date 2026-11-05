@@ -332,7 +332,7 @@ audio {
       <section class="card" id="preview-card">
         <h2>试听</h2>
         <div class="row">
-          <textarea id="preview-text" rows="3" placeholder="输入一句话试听（最多 20 字；正式朗读请用 /朗读 命令）"></textarea>
+          <textarea id="preview-text" rows="3" placeholder="输入一句话试听（最多 10 字；正式朗读请用 /朗读 命令）"></textarea>
         </div>
         <div class="row wrap">
           <label class="field">
@@ -379,7 +379,11 @@ audio {
           <button class="btn ghost" data-process="rvc-webui" data-action="stop">停止 RVC 进程</button>
           <button class="btn ghost" data-process="msst" data-action="start">启动 MSST 进程</button>
           <button class="btn ghost" data-process="msst" data-action="stop">停止 MSST 进程</button>
-          <span class="status" id="worker-status"></span>
+          <div class="row wrap">
+          <button class="btn" id="worker-refresh-models" type="button">获取模型列表</button>
+          <span class="status" id="worker-models-status"></span>
+        </div>
+        <span class="status" id="worker-status"></span>
         </div>
         <pre class="output" id="worker-output"></pre>
       </section>
@@ -683,7 +687,7 @@ function renderWorkerFields() {
 
 async function refreshWorkerModels() {
   const button = $("worker-refresh-models");
-  button.disabled = true;
+  if (button) button.disabled = true;
   setStatus("worker-models-status", "获取中…");
   try {
     const result = await bridge.apiGet("worker/models");
@@ -701,7 +705,7 @@ async function refreshWorkerModels() {
   } catch (error) {
     setStatus("worker-models-status", "翻唱 worker 获取模型失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -806,7 +810,7 @@ async function testTts() {
   } catch (error) {
     setStatus("tts-status", "语音合成连接失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -872,7 +876,7 @@ async function saveSettings() {
   } catch (error) {
     setStatus("save-status", "保存失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -895,7 +899,7 @@ async function uploadVoice() {
   } catch (error) {
     setStatus("voice-status", "上传失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -919,7 +923,7 @@ async function importVoice() {
   } catch (error) {
     setStatus("voice-status", "导入失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -967,7 +971,7 @@ async function testWorker() {
   } catch (error) {
     setStatus("worker-status", "翻唱 worker 连接失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -988,8 +992,8 @@ async function workerProcess(process, action) {
 
 async function preview() {
   const text = $("preview-text").value.trim();
-  if (text.length > 20) {
-    setStatus("preview-status", "语音合成试听：文本请控制在 20 字以内", "err");
+  if (text.length > 10) {
+    setStatus("preview-status", "语音合成试听：文本请控制在 10 字以内", "err");
     return;
   }
   if (!text) {
@@ -1019,8 +1023,13 @@ async function preview() {
   } catch (error) {
     setStatus("preview-status", "语音合成试听失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
+}
+
+function on(id, handler) {
+  const node = $(id);
+  if (node) node.addEventListener("click", handler);
 }
 
 function bindEvents() {

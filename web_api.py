@@ -63,9 +63,9 @@ except ImportError:  # 旧版 AstrBot / 离线测试：占位，不注册路由
     request = None  # type: ignore[assignment]
 
 
-PREVIEW_MAX_CHARS = 20
-PREVIEW_MAX_BYTES = 40_000
-PREVIEW_TRANSCODE_ABOVE = 15_000
+PREVIEW_MAX_CHARS = 10
+PREVIEW_MAX_BYTES = 6_000
+PREVIEW_TRANSCODE_ABOVE = 4_000
 PROCESS_ALLOWED = {"rvc-webui": "RVC 进程", "msst": "MSST 进程"}
 ACTION_ALLOWED = {"start", "stop"}
 
@@ -404,7 +404,7 @@ class StudioWebAPI:
                 mp3_path = tmp_dir / f"preview_{uuid.uuid4().hex[:8]}.mp3"
                 ok = await audio.run_ffmpeg(
                     ["-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
-                     "-ac", "1", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "32k", str(mp3_path)]
+                     "-t", "3", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "8k", str(mp3_path)]
                 )
                 if ok and mp3_path.is_file() and mp3_path.stat().st_size > 0:
                     path = mp3_path
