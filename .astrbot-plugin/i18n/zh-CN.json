@@ -2,13 +2,13 @@
   "views": {
     "studio": {
       "title": "语音工坊",
-      "description": "配置 TTS 提供商、参考音色库、翻唱 worker，并试听合成效果。"
+      "description": "配置 TTS 提供商、参考音色库与翻唱 worker。"
     }
   },
   "pages": {
     "studio": {
       "title": "语音工坊",
-      "description": "配置 TTS 提供商、参考音色库、翻唱 worker，并试听合成效果。"
+      "description": "配置 TTS 提供商、参考音色库与翻唱 worker。"
     }
   }
 }

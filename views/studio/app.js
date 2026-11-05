@@ -3,7 +3,7 @@
  * 纯原生 JS，无第三方依赖；通过 window.AstrBotPluginView bridge 调用插件后端：
  *   apiGet("settings") / apiPost("settings", {settings}) / apiGet("voices")
  *   bridge.upload("voices/upload", file) / apiPost("voices/delete")
- *   apiPost("test", {text, provider, voice, emotion})
+ *   apiPost("test", ...)  // 试听 API 保留给脚本，页面已移除试听入口
  *   apiGet("worker/health") / apiPost("worker/process", {process, action})
  */
 
@@ -419,24 +419,6 @@ async function testTts() {
   }
 }
 
-function renderPreviewOptions() {
-  fillSelect($("preview-emotion"), EMOTIONS, "auto");
-  const provider = $("provider-select").value;
-  const meta = state.providers[provider] || {};
-  const options = [["", "（使用默认音色）"]];
-  if (meta.needsRef) {
-    state.voices
-      .filter(function (voice) {
-        return voice.available;
-      })
-      .forEach(function (voice) {
-        options.push([voice.id, voice.name || voice.id]);
-      });
-  }
-  fillSelect($("preview-voice"), options, "");
-  $("preview-voice").disabled = !meta.needsRef;
-}
-
 async function refreshSettings() {
   const result = await bridge.apiGet("settings");
   if (result && result.settings) state.settings = result.settings;
@@ -445,7 +427,6 @@ async function refreshSettings() {
   renderProviderFields();
   fillCommonFields();
   renderWorkerFields();
-  renderPreviewOptions();
 }
 
 async function refreshVoices() {
@@ -456,7 +437,6 @@ async function refreshVoices() {
   }
   $("default-voice").value = state.settings.defaultVoice || "";
   renderVoices();
-  renderPreviewOptions();
 }
 
 async function saveSettings() {
@@ -595,76 +575,6 @@ async function workerProcess(process, action) {
   }
 }
 
-function normalizeBridgeResult(value) {
-  if (typeof value !== "string") return value;
-  const raw = value;
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    if (raw.length > 64 && /^[A-Za-z0-9+/=\s]+$/.test(raw)) {
-      return { data: raw.replace(/\s+/g, ""), mime: "audio/mpeg" };
-    }
-    throw new Error("后端返回了非 JSON 字符串（前 120 字符）：" + raw.slice(0, 120));
-  }
-}
-
-async function preview() {
-  const text = $("preview-text").value.trim();
-  if (text.length > 20) {
-    setStatus("preview-status", "语音合成试听：文本请控制在 20 字以内", "err");
-    return;
-  }
-  if (!text) {
-    setStatus("preview-status", "请先填写试听文本", "err");
-    return;
-  }
-  const button = $("preview-btn");
-  button.disabled = true;
-  setStatus("preview-status", "合成中…");
-  try {
-    const payload = {
-      text: text,
-      provider: $("provider-select").value,
-      voice: $("preview-voice").value || null,
-      emotion: $("preview-emotion").value || "auto",
-    };
-    let result = normalizeBridgeResult(await bridge.apiPost("test", payload));
-    let audioData = "";
-    if (result && typeof result.data === "string" && result.data) {
-      audioData = result.data;
-    } else if (result && result.previewId) {
-      const total = Math.max(1, Number(result.chunks) || 1);
-      const parts = [];
-      for (let index = 0; index < total; index += 1) {
-        const chunk = normalizeBridgeResult(
-          await bridge.apiGet("test/chunk", { id: result.previewId, index: index })
-        );
-        if (!chunk || !chunk.data) {
-          throw new Error("试听分片读取失败（第 " + (index + 1) + "/" + total + " 片）");
-        }
-        parts.push(chunk.data);
-      }
-      audioData = parts.join("");
-    }
-    if (!audioData) {
-      const shape = result === null || result === undefined ? String(result) : typeof result;
-      throw new Error("后端没有返回音频数据（结果类型：" + shape + "）");
-    }
-    $("preview-audio").src = "data:" + (result.mime || "audio/mpeg") + ";base64," + audioData;
-    setStatus(
-      "preview-status",
-      "完成：提供商 " + (result.provider || "?") + (result.emotionApplied ? "，已应用情绪" : ""),
-      "ok"
-    );
-    const player = $("preview-audio");
-    if (player && typeof player.play === "function") player.play().catch(function () {});
-  } catch (error) {
-    setStatus("preview-status", "语音合成试听失败：" + errorText(error), "err");
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
 function on(id, handler) {
   const node = $(id);
   if (node) node.addEventListener("click", handler);
@@ -674,8 +584,7 @@ function bindEvents() {
   $("provider-select").addEventListener("change", function () {
     state.settings.ttsProvider = $("provider-select").value;
     renderProviderFields();
-    renderPreviewOptions();
-  });
+    });
   $("save-settings").addEventListener("click", saveSettings);
   $("voice-upload").addEventListener("click", uploadVoice);
   $("voice-import").addEventListener("click", importVoice);
@@ -685,7 +594,6 @@ function bindEvents() {
       workerProcess(node.dataset.process, node.dataset.action);
     });
   });
-  on("preview-btn", preview);
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
 }
@@ -699,7 +607,7 @@ function applyContext(context) {
   }
   if (context.displayName) {
     $("page-subtitle").textContent =
-      context.displayName + " · TTS 提供商、参考音色库、翻唱 worker 与试听";
+      context.displayName + " · TTS 提供商、参考音色库与翻唱 Worker";
   }
 }
 

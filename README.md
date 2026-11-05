@@ -9,7 +9,7 @@ v0.3.0 新增 **可视化设置页「语音工坊」**（插件详情页 → 语
 - 选哪个 TTS 提供商，就只显示该提供商的配置字段（其余隐藏）；
 - 音色库列表 / 上传 / 删除 / 设为默认，支持从服务器路径导入；
 - 翻唱 worker 地址、Token、模型、Index、F0、变调；「测试连接」与进程启停；
-- 输入文本 + 选音色/情绪，直接试听（base64 data URI 播放）。
+- 提供「测试连接」检查 TTS/翻唱配置。
 
 设置写入 AstrBot 插件数据目录的 `settings.json`，读取顺序 **`data/settings.json` > AstrBot 插件配置**，
 旧配置仍向后兼容。
@@ -133,7 +133,7 @@ WebUI → 插件 → 重载插件。然后打开插件详情页，点「语音�
 3. **翻唱 Worker**：地址 / Token / RVC 模型 / Index / F0 方法 / 变调；
    「测试连接」调用 worker `/v1/health`；可选的 RVC/MSST 子进程启动/停止
    （调用 worker `/v1/process/*`）。
-4. **试听**：文本（≤300 字）+ 音色 + 情绪 → 后端合成，返回 base64 data URI 直接播放。
+4. **试听（API 保留，页面已移除）**：`POST test` 合成后按 4KB 分片返回，供脚本调用。
 
 > 翻唱**只需要 rvc-worker 地址**；插件不访问任何 RVC WebUI，也不需要 RVC WebUI 地址。
 
@@ -287,7 +287,7 @@ WebUI → 插件 → 重载插件。然后打开插件详情页，点「语音�
 ## 十一、OneBot v11 测试与语音条注意事项
 
 1. 私聊先发 `/语音状态`：应看到 TTS 提供商、音色库、rvc-worker 三行状态。
-2. 设置页「试听」可先验证 TTS 配置；也可跑真机脚本 `python tests/real_indextts.py`。
+2. 设置页「测试连接」可先验证 TTS 配置；也可跑真机脚本 `python tests/real_indextts.py`。
 3. 私聊发 `/朗读 你好`；群聊先在 `allowedGroups` 里加群号。
 4. 翻唱：歌曲必须放在 **AstrBot 插件进程可读** 的绝对路径下。
 5. **语音条链路是 `Record -> wav base64 -> OneBot`**：
@@ -336,7 +336,7 @@ python -B tests/real_indextts.py                 -> PASS（IndexTTS 真机，见
 - 伪 AstrBot 环境下插件包加载（相对导入）、6 个命令注册、`语音说` 别名、独立性守卫；
 - `data/settings.json`：补丁合并、优先级、非法值拒绝、损坏文件报错；
 - 设置页 Web API：路由注册、settings 读写、音色上传（重名/后缀/超限/路径穿越）、
-  列表/导入/删除/音频、试听 base64、worker 健康与进程启停；
+  列表/导入/删除/音频、worker 健康与进程启停；
 - 设置页静态资源：`index.html`↔`app.js`/`style.css`、bridge 端点、i18n、schema invisible；
 - 6 个提供商请求 URL/方法/请求体/鉴权头；`/朗读`、`/语音状态`、`/翻唱`（fake worker）全链路；
 - 混音质量（采样率/声道/峰值 0.891）。

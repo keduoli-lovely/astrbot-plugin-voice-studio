@@ -1492,7 +1492,8 @@ class TestViews(SmokeBase):
         html = html_path.read_text(encoding="utf-8")
         self.assertIn("AstrBotPluginView", html)
         self.assertIn("<style>", html)
-        for element_id in ("provider-select", "provider-fields", "voice-list", "worker-fields", "preview-audio"):
+        self.assertNotIn("preview-audio", html)
+        for element_id in ("provider-select", "provider-fields", "voice-list", "worker-fields", "worker-refresh-models"):
             self.assertIn(f'id="{element_id}"', html)
 
     def test_app_js_uses_documented_bridge_and_endpoints(self):
@@ -1505,7 +1506,6 @@ class TestViews(SmokeBase):
             'bridge.upload("voices/upload"',
             'bridge.apiPost("voices/import"',
             'bridge.apiPost("voices/delete"',
-            'bridge.apiPost("test"',
             'bridge.apiGet("worker/health")',
             'bridge.apiPost("worker/process"',
         ):
