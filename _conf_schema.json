@@ -3,14 +3,29 @@
     "description": "当前使用的 TTS 提供商",
     "type": "string",
     "default": "indextts",
-    "options": ["indextts", "gptsovits", "siliconflow", "minimax", "mimo", "openai"],
-    "labels": ["IndexTTS（本地）", "GPT-SoVITS（本地）", "SiliconFlow", "MiniMax", "小米 MiMo", "OpenAI 兼容"],
-    "hint": "本地提供商（indextts/gptsovits）需要先导入参考音色；在线提供商需要 apiKey。"
+    "options": [
+      "indextts",
+      "gptsovits",
+      "siliconflow",
+      "minimax",
+      "mimo",
+      "openai"
+    ],
+    "labels": [
+      "IndexTTS（本地）",
+      "GPT-SoVITS（本地）",
+      "SiliconFlow",
+      "MiniMax",
+      "小米 MiMo",
+      "OpenAI 兼容"
+    ],
+    "hint": "由插件设置页「语音工坊」管理（写入插件 data/settings.json）；这里只作为旧版本/命令行场景的回退值。",
+    "invisible": true
   },
   "indextts": {
     "description": "IndexTTS（本地 Gradio 应用）",
     "type": "object",
-    "hint": "需要启动 IndexTTS 2.x 的 Gradio WebUI；插件走 /gradio_api/upload + /gradio_api/call/gen_single。",
+    "hint": "在插件设置页「语音工坊」里配置；本项仅作向后兼容回退。",
     "items": {
       "baseUrl": {
         "description": "IndexTTS Gradio 地址",
@@ -21,26 +36,41 @@
         "description": "语言",
         "type": "string",
         "default": "ZH",
-        "options": ["ZH", "EN", "JA", "AR", "ES"]
+        "options": [
+          "ZH",
+          "EN",
+          "JA",
+          "AR",
+          "ES"
+        ]
       },
       "emoWeight": {
         "description": "情感权重",
         "type": "float",
         "default": 0.8,
-        "slider": { "min": 0, "max": 1, "step": 0.05 }
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        }
       },
       "durationFactor": {
         "description": "时长系数",
         "type": "float",
         "default": 1.0,
-        "slider": { "min": 0.5, "max": 2, "step": 0.05 }
+        "slider": {
+          "min": 0.5,
+          "max": 2,
+          "step": 0.05
+        }
       }
-    }
+    },
+    "invisible": true
   },
   "gptsovits": {
     "description": "GPT-SoVITS（本地 api_v2.py）",
     "type": "object",
-    "hint": "baseUrl 指向 api_v2.py（默认 9880），不是 WebUI 端口。",
+    "hint": "在插件设置页「语音工坊」里配置；baseUrl 指向 api_v2.py（默认 9880）。",
     "items": {
       "baseUrl": {
         "description": "GPT-SoVITS api_v2 地址",
@@ -66,9 +96,14 @@
         "description": "语速倍率",
         "type": "float",
         "default": 1.0,
-        "slider": { "min": 0.5, "max": 2, "step": 0.05 }
+        "slider": {
+          "min": 0.5,
+          "max": 2,
+          "step": 0.05
+        }
       }
-    }
+    },
+    "invisible": true
   },
   "siliconflow": {
     "description": "硅基流动 SiliconFlow",
@@ -99,9 +134,18 @@
         "description": "输出格式",
         "type": "string",
         "default": "wav",
-        "options": ["wav", "mp3", "opus", "flac", "aac", "pcm"]
+        "options": [
+          "wav",
+          "mp3",
+          "opus",
+          "flac",
+          "aac",
+          "pcm"
+        ]
       }
-    }
+    },
+    "invisible": true,
+    "hint": "在插件设置页「语音工坊」里配置。"
   },
   "minimax": {
     "description": "MiniMax 语音合成",
@@ -137,14 +181,23 @@
         "description": "输出格式",
         "type": "string",
         "default": "mp3",
-        "options": ["mp3", "wav", "opus", "flac", "aac", "pcm"]
+        "options": [
+          "mp3",
+          "wav",
+          "opus",
+          "flac",
+          "aac",
+          "pcm"
+        ]
       }
-    }
+    },
+    "invisible": true,
+    "hint": "在插件设置页「语音工坊」里配置。"
   },
   "mimo": {
     "description": "小米 MiMo 语音合成",
     "type": "object",
-    "hint": "MiMo 走 OpenAI 兼容的 /chat/completions + audio 参数；baseUrl 请按官方文档填写。",
+    "hint": "在插件设置页「语音工坊」里配置（baseUrl 按 MiMo 官方文档填写）。",
     "items": {
       "baseUrl": {
         "description": "API Base URL（按 MiMo 官方文档填写）",
@@ -176,9 +229,17 @@
         "description": "输出格式",
         "type": "string",
         "default": "wav",
-        "options": ["wav", "mp3", "opus", "flac", "aac", "pcm"]
+        "options": [
+          "wav",
+          "mp3",
+          "opus",
+          "flac",
+          "aac",
+          "pcm"
+        ]
       }
-    }
+    },
+    "invisible": true
   },
   "openai": {
     "description": "OpenAI 兼容 /v1/audio/speech",
@@ -209,20 +270,29 @@
         "description": "输出格式",
         "type": "string",
         "default": "mp3",
-        "options": ["mp3", "wav", "opus", "flac", "aac", "pcm"]
+        "options": [
+          "mp3",
+          "wav",
+          "opus",
+          "flac",
+          "aac",
+          "pcm"
+        ]
       },
       "emotionInstructions": {
         "description": "是否把情绪写成 instructions",
         "type": "bool",
         "default": true
       }
-    }
+    },
+    "invisible": true,
+    "hint": "在插件设置页「语音工坊」里配置。"
   },
   "defaultVoice": {
     "description": "默认参考音色（本地提供商使用：音色库里的 id 或名称）",
     "type": "string",
     "default": "",
-    "hint": "本地提供商留空时使用音色库第一个可用音色；在线提供商的 voice 请在各提供商配置里填。"
+    "hint": "本地提供商使用；在设置页音色库点「设为默认」会写入 data/settings.json（优先于本项）。"
   },
   "defaultEmotion": {
     "description": "默认情绪模式",
@@ -234,53 +304,82 @@
     "description": "默认情绪强度",
     "type": "float",
     "default": 0.6,
-    "slider": { "min": 0, "max": 1, "step": 0.05 }
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    }
   },
   "ttsSpeed": {
     "description": "默认语速倍率",
     "type": "float",
     "default": 1.0,
-    "slider": { "min": 0.5, "max": 2, "step": 0.05 }
+    "slider": {
+      "min": 0.5,
+      "max": 2,
+      "step": 0.05
+    }
   },
   "voiceDir": {
     "description": "参考音色库目录",
     "type": "string",
     "default": "data/voices",
-    "hint": "相对路径基于插件目录；元数据写在同级 <目录名>.json（默认 data/voices.json）。"
+    "hint": "参考音色库目录（相对插件目录）；元数据写在同级 <目录名>.json。设置页上传的音色也存到这里。"
   },
   "workerUrl": {
     "description": "rvc-worker 地址（翻唱用）",
     "type": "string",
-    "default": "http://127.0.0.1:7870"
+    "default": "http://127.0.0.1:7870",
+    "invisible": true,
+    "hint": "由插件设置页「语音工坊」的「翻唱 Worker」区域管理（写入插件 data/settings.json）；本项仅作向后兼容回退。"
   },
   "workerToken": {
     "description": "rvc-worker Bearer Token",
     "type": "string",
     "default": "",
-    "secret": true
+    "secret": true,
+    "invisible": true,
+    "hint": "由插件设置页「语音工坊」的「翻唱 Worker」区域管理（写入插件 data/settings.json）；本项仅作向后兼容回退。"
   },
   "workerModel": {
     "description": "RVC 模型（.pth 的 id 或文件名）",
     "type": "string",
     "default": "",
-    "hint": "留空时调用 GET /v1/models 取第一个可用模型。"
+    "hint": "由插件设置页「语音工坊」的「翻唱 Worker」区域管理（写入插件 data/settings.json）；本项仅作向后兼容回退。",
+    "invisible": true
   },
   "workerIndex": {
     "description": "RVC index 文件（可选）",
     "type": "string",
-    "default": ""
+    "default": "",
+    "invisible": true,
+    "hint": "由插件设置页「语音工坊」的「翻唱 Worker」区域管理（写入插件 data/settings.json）；本项仅作向后兼容回退。"
   },
   "workerF0Method": {
     "description": "音高提取方法",
     "type": "string",
     "default": "rmvpe",
-    "options": ["rmvpe", "pm", "harvest", "crepe", "fcpe"]
+    "options": [
+      "rmvpe",
+      "pm",
+      "harvest",
+      "crepe",
+      "fcpe"
+    ],
+    "invisible": true,
+    "hint": "由插件设置页「语音工坊」的「翻唱 Worker」区域管理（写入插件 data/settings.json）；本项仅作向后兼容回退。"
   },
   "workerKeyShift": {
     "description": "变调（半音）",
     "type": "int",
     "default": 0,
-    "slider": { "min": -24, "max": 24, "step": 1 }
+    "slider": {
+      "min": -24,
+      "max": 24,
+      "step": 1
+    },
+    "invisible": true,
+    "hint": "由插件设置页「语音工坊」的「翻唱 Worker」区域管理（写入插件 data/settings.json）；本项仅作向后兼容回退。"
   },
   "allowedGroups": {
     "description": "允许使用语音命令的群号白名单（留空=不限制）",
@@ -292,25 +391,41 @@
     "description": "单次朗读最长文本字数",
     "type": "int",
     "default": 1000,
-    "slider": { "min": 50, "max": 5000, "step": 50 }
+    "slider": {
+      "min": 50,
+      "max": 5000,
+      "step": 50
+    }
   },
   "maxDurationSec": {
     "description": "翻唱允许的最长歌曲时长（秒）",
     "type": "int",
     "default": 600,
-    "slider": { "min": 30, "max": 3600, "step": 30 }
+    "slider": {
+      "min": 30,
+      "max": 3600,
+      "step": 30
+    }
   },
   "jobTimeoutSec": {
     "description": "rvc-worker 单个任务最长等待秒数",
     "type": "int",
     "default": 1800,
-    "slider": { "min": 120, "max": 7200, "step": 60 }
+    "slider": {
+      "min": 120,
+      "max": 7200,
+      "step": 60
+    }
   },
   "requestTimeoutSec": {
     "description": "TTS 请求读取超时（秒）",
     "type": "int",
     "default": 600,
-    "slider": { "min": 30, "max": 1800, "step": 30 }
+    "slider": {
+      "min": 30,
+      "max": 1800,
+      "step": 30
+    }
   },
   "sendProgress": {
     "description": "翻唱时发送阶段提示",

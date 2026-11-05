@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .common import (
     MAX_VOICE_BYTES,
@@ -25,6 +26,17 @@ from .common import (
     VoiceStudioError,
     format_bytes,
 )
+
+
+def _safe_upload_name(filename: object) -> str:
+    """只取 multipart 文件名的 basename，清掉路径分隔符与 Windows 非法字符。"""
+
+    raw = str(filename or "").replace("\\", "/").replace("\x00", "")
+    name = PurePosixPath(raw).name.strip()
+    name = re.sub(r'[:*?"<>|]', "_", name)
+    if not name or name in {".", ".."}:
+        raise VoiceStudioError("上传的文件名无效，请换一个音频文件。")
+    return name
 
 
 class VoiceStore:
@@ -208,6 +220,66 @@ class VoiceStore:
                 "file": filename,
                 "description": str(description or "").strip(),
                 "size": int(size),
+                "createdAt": int(time.time() * 1000),
+            }
+            voices.append(entry)
+            data["voices"] = voices
+            try:
+                self._write(data)
+            except VoiceStudioError:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+        return entry
+
+    def add_bytes(
+        self,
+        content: bytes,
+        filename: str,
+        name: str | None = None,
+        description: str = "",
+    ) -> dict:
+        """从上传的字节流新增音色（WebUI 上传用）。
+
+        文件名只取 basename，扩展名必须在白名单里；重名自动加序号。
+        与 :meth:`add` 一样把音频复制进库，不会引用上传的临时文件。
+        """
+
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            raise VoiceStudioError("上传的音频文件是空的。")
+        safe_name = _safe_upload_name(filename)
+        suffix = Path(safe_name).suffix.lower()
+        if suffix not in REF_AUDIO_SUFFIXES:
+            raise VoiceStudioError(
+                f"不支持的音频格式「{suffix or '(无后缀)'}」，支持："
+                + " / ".join(sorted(REF_AUDIO_SUFFIXES))
+            )
+        if len(content) > MAX_VOICE_BYTES:
+            raise VoiceStudioError(
+                f"音频文件 {format_bytes(len(content))} 超过上限 {format_bytes(MAX_VOICE_BYTES)}，"
+                "请裁剪后再上传。"
+            )
+        stem = Path(safe_name).stem.strip() or "voice"
+        with self._lock:
+            data = self._read()
+            voices = [voice for voice in data["voices"] if isinstance(voice, dict)]
+            display_name = self._unique_name(str(name or stem).strip() or stem, voices)
+            voice_id = "v" + uuid.uuid4().hex[:8]
+            target = self.root / f"{voice_id}{suffix}"
+            try:
+                self.root.mkdir(parents=True, exist_ok=True)
+                with target.open("wb") as handle:
+                    handle.write(bytes(content))
+            except OSError as exc:
+                raise VoiceStudioError(f"保存参考音频失败：{exc}") from exc
+            entry = {
+                "id": voice_id,
+                "name": display_name,
+                "file": target.name,
+                "description": str(description or "").strip(),
+                "size": len(content),
                 "createdAt": int(time.time() * 1000),
             }
             voices.append(entry)

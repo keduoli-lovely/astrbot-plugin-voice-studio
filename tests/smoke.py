@@ -3,7 +3,7 @@
 运行：
     python tests/smoke.py
 
-覆盖：
+覆盖（共 71 个用例）：
 1. 在伪 AstrBot（Star / filter / 事件 / Record）环境下能加载插件包（相对导入正常）；
 2. 6 个中文命令注册（朗读 + 语音说别名、翻唱、音色、音色导入、音色删除、语音状态）；
 3. 插件是**独立的**：源码里没有 DSH 路由 / voiceStudioUrl 之类的引用；
@@ -15,7 +15,13 @@
    siliconflow、minimax（hex）、mimo（base64）、openai；
 8. /朗读 全链路（provider mock）→ Record 发送；
 9. /语音状态 → 检查插件自身配置 + worker /v1/health；
-10. /翻唱 全链路（fake worker：上传→分离→下载→换声→混音→Record）与混音质量。
+10. /翻唱 全链路（fake worker：上传→分离→下载→换声→混音→Record）与混音质量；
+11. data/settings.json：补丁合并、settings > AstrBot 配置的优先级、非法值拒绝、损坏文件报错；
+12. 设置页 Web API：路由注册、GET/POST settings、音色上传/重名/后缀/超限/路径穿越、
+    音色列表/导入/删除/试听音频、试听合成（base64）、worker 健康检查与进程启停；
+13. 设置页静态资源：index.html 引用的 app.js/style.css 都存在、JS 只走 bridge、
+    i18n 的 views.studio.title/description 存在；
+14. _conf_schema.json：由设置页接管的字段标记 invisible，可见项保留，且不含 RVC WebUI 字样。
 """
 
 from __future__ import annotations
@@ -91,7 +97,13 @@ class FakeStar:
 
 
 class FakeContext:
-    pass
+    def __init__(self):
+        self.web_routes: list[dict] = []
+
+    def register_web_api(self, route, handler, methods, desc=""):
+        self.web_routes.append(
+            {"route": route, "handler": handler, "methods": list(methods), "desc": desc}
+        )
 
 
 class FakeEvent:
@@ -134,6 +146,76 @@ FILTER = FakeFilter()
 LOGGER = FakeLogger()
 
 
+# ---------------------------------------------------------------------------
+# 伪造 astrbot.api.web（插件设置页后端 API）
+# ---------------------------------------------------------------------------
+
+
+class FakeWebResponse:
+    def __init__(self, data=None, status_code: int = 200, error: str | None = None, path=None, filename=None, content_type=None):
+        self.data = data
+        self.status_code = status_code
+        self.error = error
+        self.path = path
+        self.filename = filename
+        self.content_type = content_type
+
+    @property
+    def message(self):
+        if self.error:
+            return self.error
+        if isinstance(self.data, dict):
+            return self.data.get("message")
+        return None
+
+
+class FakeWebUploadFile:
+    def __init__(self, filename: str, content: bytes):
+        self.filename = filename
+        self.content = bytes(content)
+        self.content_length = len(self.content)
+        self.content_type = "application/octet-stream"
+
+    async def read(self, size: int = -1):
+        if size is None or size < 0:
+            return self.content
+        return self.content[:size]
+
+
+class FakeWebRequest:
+    def __init__(self, method="GET", json_data=None, form_data=None, files_data=None, query=None):
+        self.method = method
+        self._json = json_data
+        self._form = form_data or {}
+        self._files = files_data or {}
+        self.query = query or {}
+
+    async def json(self, default=None):
+        return self._json if self._json is not None else default
+
+    async def form(self):
+        return self._form
+
+    async def files(self):
+        return self._files
+
+
+def fake_json_response(data=None, *, status_code: int = 200, headers=None):
+    return FakeWebResponse(data=data, status_code=status_code)
+
+
+def fake_error_response(message, *, status_code: int = 400, data=None, headers=None):
+    return FakeWebResponse(
+        data={"status": "error", "message": message},
+        status_code=status_code,
+        error=str(message),
+    )
+
+
+def fake_file_response(path, *, filename=None, content_type=None, headers=None):
+    return FakeWebResponse(path=str(path), filename=filename, content_type=content_type)
+
+
 def install_fake_astrbot():
     astrbot_mod = types.ModuleType("astrbot")
     api_mod = types.ModuleType("astrbot.api")
@@ -147,6 +229,12 @@ def install_fake_astrbot():
     star_mod = types.ModuleType("astrbot.api.star")
     star_mod.Context = FakeContext
     star_mod.Star = FakeStar
+    web_mod = types.ModuleType("astrbot.api.web")
+    web_mod.PluginUploadFile = FakeWebUploadFile
+    web_mod.json_response = fake_json_response
+    web_mod.error_response = fake_error_response
+    web_mod.file_response = fake_file_response
+    web_mod.request = None
     sys.modules.update(
         {
             "astrbot": astrbot_mod,
@@ -154,6 +242,7 @@ def install_fake_astrbot():
             "astrbot.api.event": event_mod,
             "astrbot.api.message_components": components_mod,
             "astrbot.api.star": star_mod,
+            "astrbot.api.web": web_mod,
         }
     )
 
@@ -266,6 +355,8 @@ install_fake_httpx()
 MAIN = load_plugin_package()
 EMOTION = sys.modules[f"{PKG}.emotion"]
 VOICE_MOD = sys.modules[f"{PKG}.voice_store"]
+SETTINGS_MOD = sys.modules[f"{PKG}.settings_store"]
+WEB = sys.modules[f"{PKG}.web_api"]
 TTS = MAIN.tts_providers
 AUDIO = MAIN.audio
 WORKER = MAIN.worker
@@ -332,7 +423,13 @@ def make_plugin(**overrides):
         "sendProgress": True,
     }
     config.update(overrides)
-    return MAIN.VoiceStudioPlugin(FakeContext(), config)
+    context = FakeContext()
+    plugin = MAIN.VoiceStudioPlugin(context, config)
+    # 把运行数据/设置文件隔离到临时目录，避免污染仓库里的 data/
+    plugin._data_dir = Path(tempfile.mkdtemp(prefix="vs_data_"))
+    plugin._tmp_dir().mkdir(parents=True, exist_ok=True)
+    plugin._settings_store = MAIN.SettingsStore(plugin._data_dir / "settings.json")
+    return plugin
 
 
 async def collect(generator):
@@ -366,7 +463,7 @@ class TestPluginShape(SmokeBase):
         self.assertTrue(hasattr(MAIN, "VoiceStudioPlugin"))
         self.assertTrue(issubclass(MAIN.VoiceStudioPlugin, FakeStar))
         self.assertIs(MAIN.Record, FakeRecord)
-        self.assertEqual(MAIN.PLUGIN_VERSION, "0.2.0")
+        self.assertEqual(MAIN.PLUGIN_VERSION, "0.3.0")
 
     def test_commands_registered(self):
         registered = {name: alias for name, alias in FILTER.commands}
@@ -1081,6 +1178,344 @@ class TestHttpClient(SmokeBase):
         self.assertTrue(client.kwargs["follow_redirects"])
         self.assertIsInstance(client.kwargs["timeout"], _FakeTimeout)
         self.assertTrue(client.closed)
+
+
+# ---------------------------------------------------------------------------
+# 13. data/settings.json（设置页存储）与合并优先级
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsStore(SmokeBase):
+    def test_patch_and_merge_precedence(self):
+        store = SETTINGS_MOD.SettingsStore(self.tmp / "settings.json")
+        config = {
+            "ttsProvider": "indextts",
+            "siliconflow": {"baseUrl": "https://sf.example/v1", "apiKey": ""},
+            "workerUrl": "http://old:7870",
+            "workerF0Method": "pm",
+            "defaultVoice": "cfg-voice",
+        }
+        store.patch(
+            {
+                "ttsProvider": "siliconflow",
+                "providers": {"siliconflow": {"apiKey": "sk-live"}},
+                "worker": {"url": "http://new:7870"},
+                "defaultVoice": "stored-voice",
+            }
+        )
+        merged = SETTINGS_MOD.merge_settings(store.read(), config)
+        self.assertEqual(merged["ttsProvider"], "siliconflow")
+        self.assertEqual(merged["providers"]["siliconflow"]["apiKey"], "sk-live")
+        # 未在 settings.json 里写的字段仍从 AstrBot 配置回退
+        self.assertEqual(merged["providers"]["siliconflow"]["baseUrl"], "https://sf.example/v1")
+        self.assertEqual(merged["worker"]["url"], "http://new:7870")
+        self.assertEqual(merged["worker"]["f0Method"], "pm")
+        self.assertEqual(merged["defaultVoice"], "stored-voice")
+
+    def test_nested_patch_keeps_other_provider_keys(self):
+        store = SETTINGS_MOD.SettingsStore(self.tmp / "settings.json")
+        store.patch({"providers": {"openai": {"apiKey": "a"}}})
+        store.patch({"providers": {"openai": {"voice": "nova"}}})
+        cfg = store.read()["providers"]["openai"]
+        self.assertEqual(cfg["apiKey"], "a")
+        self.assertEqual(cfg["voice"], "nova")
+
+    def test_validate_rejects_bad_values(self):
+        validate = SETTINGS_MOD.validate_settings_patch
+        with self.assertRaises(MAIN.VoiceStudioError):
+            validate({"ttsProvider": "nope"})
+        with self.assertRaises(MAIN.VoiceStudioError):
+            validate({"providers": {"openai": {"format": "aiff"}}})
+        with self.assertRaises(MAIN.VoiceStudioError):
+            validate({"providers": {"nope": {}}})
+        cleaned = validate({"worker": {"keyShift": 99, "f0Method": "pm"}})
+        self.assertEqual(cleaned["worker"]["keyShift"], 24)
+        self.assertEqual(cleaned["worker"]["f0Method"], "pm")
+        with self.assertRaises(MAIN.VoiceStudioError):
+            validate({"worker": {"f0Method": "nope"}})
+
+    def test_corrupt_file_raises(self):
+        path = self.tmp / "settings.json"
+        path.write_text("{not-json", encoding="utf-8")
+        store = SETTINGS_MOD.SettingsStore(path)
+        with self.assertRaises(MAIN.VoiceStudioError):
+            store.read()
+
+    def test_partial_default_voice_patch(self):
+        store = SETTINGS_MOD.SettingsStore(self.tmp / "settings.json")
+        store.patch({"defaultVoice": "v123"})
+        self.assertEqual(store.read()["defaultVoice"], "v123")
+
+
+# ---------------------------------------------------------------------------
+# 14. 设置页后端 Web API
+# ---------------------------------------------------------------------------
+
+
+class TestWebAPI(SmokeBase):
+    def use_request(self, **kwargs):
+        WEB.request = FakeWebRequest(**kwargs)
+
+    def call(self, handler):
+        return self.run_async(handler())
+
+    def test_routes_registered(self):
+        plugin = make_plugin()
+        self.assertIsNotNone(plugin._web_api)
+        routes = set(plugin._web_api.routes)
+        for expected in (
+            "settings",
+            "voices",
+            "voices/upload",
+            "voices/import",
+            "voices/delete",
+            "voices/audio",
+            "test",
+            "worker/health",
+            "worker/process",
+        ):
+            self.assertIn(expected, routes)
+        context_routes = [item["route"] for item in plugin.context.web_routes]
+        self.assertTrue(all("/astrbot" in route or "/" in route for route in context_routes))
+        methods = {item["route"].rsplit("/", 1)[-1]: item["methods"] for item in plugin.context.web_routes}
+        self.assertIn("get", [m.lower() for m in methods.get("settings", [])])
+        self.assertIn("post", [m.lower() for m in methods.get("settings", [])])
+
+    def test_get_settings(self):
+        plugin = make_plugin()
+        self.use_request(method="GET")
+        response = self.call(plugin._web_api.handle_settings)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["settings"]["ttsProvider"], "indextts")
+        self.assertEqual(len(response.data["providers"]), 6)
+        self.assertEqual(response.data["providers"]["indextts"]["kind"], "local")
+
+    def test_post_settings_persists_to_settings_json(self):
+        plugin = make_plugin()
+        self.use_request(
+            method="POST",
+            json_data={
+                "settings": {
+                    "ttsProvider": "openai",
+                    "providers": {"openai": {"apiKey": "sk-new"}},
+                }
+            },
+        )
+        response = self.call(plugin._web_api.handle_settings)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plugin._provider(), "openai")
+        self.assertEqual(plugin._provider_cfg("openai")["apiKey"], "sk-new")
+        self.assertTrue((plugin._data_dir / "settings.json").is_file())
+
+    def test_post_settings_rejects_unknown_provider(self):
+        plugin = make_plugin()
+        self.use_request(method="POST", json_data={"settings": {"ttsProvider": "nope"}})
+        response = self.call(plugin._web_api.handle_settings)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("未知", response.message)
+
+    def test_upload_voice_and_duplicate_name(self):
+        plugin = make_plugin()
+        upload = FakeWebUploadFile("ref.wav", b"RIFF-fake-wav")
+        self.use_request(method="POST", files_data={"file": upload})
+        response = self.call(plugin._web_api.handle_voice_upload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["voice"]["name"], "ref")
+        self.assertEqual(len(plugin._store().list_voices()), 1)
+
+        same = FakeWebUploadFile("ref.wav", b"RIFF-fake-wav-2")
+        self.use_request(method="POST", files_data={"file": same})
+        second = self.call(plugin._web_api.handle_voice_upload)
+        self.assertEqual(second.data["voice"]["name"], "ref (2)")
+
+    def test_upload_rejects_bad_extension_and_oversize(self):
+        plugin = make_plugin()
+        bad = FakeWebUploadFile("note.txt", b"hello")
+        self.use_request(method="POST", files_data={"file": bad})
+        response = self.call(plugin._web_api.handle_voice_upload)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("不支持", response.message)
+
+        with mock.patch.object(WEB, "MAX_VOICE_BYTES", 4):
+            big = FakeWebUploadFile("big.wav", b"12345678")
+            self.use_request(method="POST", files_data={"file": big})
+            response = self.call(plugin._web_api.handle_voice_upload)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("上限", response.message)
+
+    def test_upload_filename_traversal_is_sanitized(self):
+        plugin = make_plugin()
+        upload = FakeWebUploadFile("..\\..\\evil.wav", b"RIFF-evil")
+        self.use_request(method="POST", files_data={"file": upload})
+        response = self.call(plugin._web_api.handle_voice_upload)
+        self.assertEqual(response.status_code, 200)
+        entry = response.data["voice"]
+        self.assertTrue(entry["file"].endswith(".wav"))
+        self.assertNotIn("..", entry["file"])
+        self.assertNotIn("/", entry["file"])
+        self.assertTrue((plugin._store().root / entry["file"]).is_file())
+        self.assertFalse((plugin._store().root.parent / "evil.wav").exists())
+
+    def test_upload_missing_file_field(self):
+        plugin = make_plugin()
+        self.use_request(method="POST", files_data={})
+        response = self.call(plugin._web_api.handle_voice_upload)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("file", response.message)
+
+    def test_voice_list_import_delete_and_audio(self):
+        plugin = make_plugin()
+        ref = write_wav(self.tmp / "server_ref.wav", seconds=0.1)
+        self.use_request(method="POST", json_data={"path": str(ref), "name": "服务器导入"})
+        imported = self.call(plugin._web_api.handle_voice_import)
+        self.assertEqual(imported.status_code, 200)
+        entry = imported.data["voice"]
+
+        self.use_request(method="GET")
+        listed = self.call(plugin._web_api.handle_voices)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.data["voices"]), 1)
+        self.assertEqual(listed.data["voices"][0]["name"], "服务器导入")
+
+        self.use_request(method="GET", query={"name": entry["id"]})
+        audio = self.call(plugin._web_api.handle_voice_audio)
+        self.assertTrue(Path(audio.path).is_file())
+        self.assertEqual(audio.content_type, "audio/wav")
+
+        self.use_request(method="POST", json_data={"id": entry["id"]})
+        deleted = self.call(plugin._web_api.handle_voice_delete)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(plugin._store().list_voices(), [])
+
+    def test_voice_audio_blocks_path_traversal(self):
+        plugin = make_plugin()
+        self.use_request(method="GET", query={"name": "../settings.json"})
+        response = self.call(plugin._web_api.handle_voice_audio)
+        self.assertEqual(response.status_code, 404)
+
+    def test_import_requires_path(self):
+        plugin = make_plugin()
+        self.use_request(method="POST", json_data={"name": "x"})
+        response = self.call(plugin._web_api.handle_voice_import)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("绝对路径", response.message)
+
+    def _install_fake_synth(self):
+        async def fake(client, provider, cfg, *, text, ref_path, emotion, speed, dest, timeout):
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            write_wav(Path(dest), channels=1, sample_rate=22050, seconds=0.1, freq=440, amp=0.2)
+            return {"provider": provider, "path": Path(dest), "format": "wav", "emotionApplied": True}
+
+        return fake
+
+    def test_preview_returns_base64_audio(self):
+        plugin = make_plugin()
+        plugin._store().add(write_wav(self.tmp / "ref.wav", seconds=0.1), "小鲸鱼")
+        self.use_request(
+            method="POST",
+            json_data={"text": "你好", "provider": "indextts", "emotion": "happy"},
+        )
+        with mock.patch.object(TTS, "synthesize", self._install_fake_synth()):
+            response = self.call(plugin._web_api.handle_test)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["mime"], "audio/wav")
+        content = base64.b64decode(response.data["data"])
+        self.assertTrue(content.startswith(b"RIFF"))
+
+    def test_preview_validates_input(self):
+        plugin = make_plugin()
+        self.use_request(method="POST", json_data={"text": ""})
+        self.assertEqual(self.call(plugin._web_api.handle_test).status_code, 400)
+        self.use_request(method="POST", json_data={"text": "你好", "provider": "nope"})
+        self.assertEqual(self.call(plugin._web_api.handle_test).status_code, 400)
+        self.use_request(method="POST", json_data={"text": "啊" * 301, "provider": "openai"})
+        self.assertEqual(self.call(plugin._web_api.handle_test).status_code, 400)
+
+    def test_worker_health_and_process(self):
+        plugin = make_plugin()
+
+        async def fake_health():
+            return {"ok": True, "version": "1.0.0", "gpu": {"name": "RTX"}}
+
+        self.use_request(method="GET")
+        with mock.patch.object(
+            MAIN.VoiceStudioPlugin,
+            "worker_health",
+            new=mock.AsyncMock(side_effect=fake_health),
+        ):
+            response = self.call(plugin._web_api.handle_worker_health)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["health"]["version"], "1.0.0")
+
+        self.use_request(method="POST", json_data={"process": "rvc-webui", "action": "start"})
+        fake_api_json = mock.AsyncMock(return_value={"pid": 123})
+        with mock.patch.object(WORKER, "api_json", new=fake_api_json):
+            response = self.call(plugin._web_api.handle_worker_process)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("rvc-webui", fake_api_json.call_args.args[2])
+        self.assertIn("/start", fake_api_json.call_args.args[2])
+
+        self.use_request(method="POST", json_data={"process": "shell", "action": "start"})
+        response = self.call(plugin._web_api.handle_worker_process)
+        self.assertEqual(response.status_code, 400)
+
+
+# ---------------------------------------------------------------------------
+# 15. 设置页静态资源
+# ---------------------------------------------------------------------------
+
+
+class TestViews(SmokeBase):
+    def test_view_files_exist_and_are_referenced(self):
+        view_dir = PLUGIN_DIR / "views" / "studio"
+        html_path = view_dir / "index.html"
+        js_path = view_dir / "app.js"
+        css_path = view_dir / "style.css"
+        self.assertTrue(html_path.is_file(), "缺少 views/studio/index.html")
+        self.assertTrue(js_path.is_file(), "缺少 views/studio/app.js")
+        self.assertTrue(css_path.is_file(), "缺少 views/studio/style.css")
+        html = html_path.read_text(encoding="utf-8")
+        self.assertIn("./app.js", html)
+        self.assertIn("./style.css", html)
+        for element_id in ("provider-select", "provider-fields", "voice-list", "worker-fields", "preview-audio"):
+            self.assertIn(f'id="{element_id}"', html)
+
+    def test_app_js_uses_documented_bridge_and_endpoints(self):
+        source = (PLUGIN_DIR / "views" / "studio" / "app.js").read_text(encoding="utf-8")
+        for token in (
+            "window.AstrBotPluginView",
+            'bridge.apiGet("settings")',
+            'bridge.apiGet("voices")',
+            'bridge.apiPost("settings"',
+            'bridge.upload("voices/upload"',
+            'bridge.apiPost("voices/import"',
+            'bridge.apiPost("voices/delete"',
+            'bridge.apiPost("test"',
+            'bridge.apiGet("worker/health")',
+            'bridge.apiPost("worker/process"',
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn("fetch(", source, "页面不应绕过 bridge 直接 fetch 后端")
+        self.assertNotIn("XMLHttpRequest", source)
+
+    def test_i18n_metadata_for_view(self):
+        for locale in ("zh-CN", "en-US"):
+            path = PLUGIN_DIR / ".astrbot-plugin" / "i18n" / f"{locale}.json"
+            self.assertTrue(path.is_file(), f"缺少 {locale}.json")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIn("title", data["views"]["studio"])
+            self.assertIn("description", data["views"]["studio"])
+
+    def test_schema_marks_page_managed_fields_invisible(self):
+        schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
+        for key in ("ttsProvider", "indextts", "gptsovits", "siliconflow", "minimax", "mimo", "openai"):
+            self.assertTrue(schema[key].get("invisible"), f"{key} 应为 invisible")
+        for key in ("workerUrl", "workerToken", "workerModel", "workerIndex", "workerF0Method", "workerKeyShift"):
+            self.assertTrue(schema[key].get("invisible"), f"{key} 应为 invisible")
+        for key in ("allowedGroups", "maxTextLen", "maxDurationSec", "sendProgress", "ttsSpeed", "defaultVoice"):
+            self.assertFalse(schema[key].get("invisible"), f"{key} 应保持可见")
+        text = json.dumps(schema, ensure_ascii=False)
+        self.assertNotIn("RVC WebUI", text)
 
 
 def main():

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>语音工坊</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1 id="page-title">语音工坊</h1>
+      <p class="subtitle" id="page-subtitle">TTS 提供商、参考音色库、翻唱 worker 与试听</p>
+    </header>
+
+    <main class="layout">
+      <section class="card" id="provider-card">
+        <h2>语音合成</h2>
+
+        <div class="row">
+          <label class="field grow">
+            <span>提供商</span>
+            <select id="provider-select"></select>
+          </label>
+        </div>
+
+        <div class="provider-fields" id="provider-fields"></div>
+
+        <div class="row wrap">
+          <label class="field">
+            <span>默认情绪</span>
+            <select id="default-emotion"></select>
+          </label>
+          <label class="field">
+            <span>情绪强度</span>
+            <input id="emotion-intensity" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label class="field">
+            <span>默认语速</span>
+            <input id="tts-speed" type="number" min="0.5" max="2" step="0.05" />
+          </label>
+          <label class="field grow">
+            <span>默认音色（本地提供商）</span>
+            <input id="default-voice" type="text" readonly placeholder="在音色库中点「设为默认」" />
+          </label>
+        </div>
+
+        <div class="row">
+          <button class="btn primary" id="save-settings">保存设置</button>
+          <span class="status" id="save-status"></span>
+        </div>
+      </section>
+
+      <section class="card" id="voices-card">
+        <h2>参考音色库</h2>
+        <p class="hint">上传的音频会复制到插件目录 <code>data/voices/</code>，限 30MB，支持 wav/mp3/flac/m4a/ogg/opus/aac。重名会自动加序号。</p>
+
+        <div class="row wrap">
+          <input type="file" id="voice-file" accept=".wav,.mp3,.flac,.m4a,.ogg,.opus,.aac,.wma,.aiff,.aif" />
+          <button class="btn" id="voice-upload">上传音色</button>
+        </div>
+
+        <div class="row wrap">
+          <input class="grow" id="import-path" type="text" placeholder="或填写服务器上的音频绝对路径，例如 C:\voices\ref.wav" />
+          <input id="import-name" type="text" placeholder="名称（可选）" />
+          <button class="btn" id="voice-import">从路径导入</button>
+        </div>
+
+        <div class="status" id="voice-status"></div>
+        <div class="voice-list" id="voice-list"></div>
+      </section>
+
+      <section class="card" id="worker-card">
+        <h2>翻唱 Worker</h2>
+        <p class="hint">翻唱只依赖独立的 rvc-worker（RVC/MSST 服务）；插件不安装 RVC 依赖。</p>
+        <div class="provider-fields" id="worker-fields"></div>
+        <div class="row wrap">
+          <button class="btn" id="worker-test">测试连接</button>
+          <button class="btn ghost" data-process="rvc-webui" data-action="start">启动 RVC 进程</button>
+          <button class="btn ghost" data-process="rvc-webui" data-action="stop">停止 RVC 进程</button>
+          <button class="btn ghost" data-process="msst" data-action="start">启动 MSST 进程</button>
+          <button class="btn ghost" data-process="msst" data-action="stop">停止 MSST 进程</button>
+          <span class="status" id="worker-status"></span>
+        </div>
+        <pre class="output" id="worker-output"></pre>
+      </section>
+
+      <section class="card" id="preview-card">
+        <h2>试听</h2>
+        <div class="row">
+          <textarea id="preview-text" rows="3" placeholder="输入一句话试听（最多 300 字；正式朗读请用 /朗读 命令）"></textarea>
+        </div>
+        <div class="row wrap">
+          <label class="field">
+            <span>音色</span>
+            <select id="preview-voice"></select>
+          </label>
+          <label class="field">
+            <span>情绪</span>
+            <select id="preview-emotion"></select>
+          </label>
+          <button class="btn primary" id="preview-btn">试听</button>
+          <span class="status" id="preview-status"></span>
+        </div>
+        <audio id="preview-audio" controls preload="none"></audio>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

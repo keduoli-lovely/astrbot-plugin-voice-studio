@@ -57,7 +57,9 @@ from .common import (
     strip_wake_prefix,
     unquote,
 )
+from .settings_store import SettingsStore, merge_settings, validate_settings_patch
 from .voice_store import VoiceStore
+from .web_api import StudioWebAPI
 
 _COMMAND_NAMES = ("语音状态", "音色导入", "音色删除", "语音说", "朗读", "音色", "翻唱")
 
@@ -228,6 +230,13 @@ class VoiceStudioPlugin(Star):
         self._data_dir = self._plugin_dir / "data"
         self._http_client = None
         self._voice_store: VoiceStore | None = None
+        self._settings_store = SettingsStore(self._data_dir / "settings.json")
+        self._web_api: StudioWebAPI | None = None
+        try:
+            self._web_api = StudioWebAPI(self)
+            self._web_api.register(context)
+        except Exception:  # noqa: BLE001 - 设置页注册失败不影响命令
+            logger.exception("[%s] 注册插件 Web API 失败，设置页不可用", PLUGIN_NAME)
 
     # -- 生命周期 -----------------------------------------------------------
     async def terminate(self) -> None:  # pragma: no cover - 卸载时调用
@@ -297,9 +306,33 @@ class VoiceStudioPlugin(Star):
         )
         return self._http_client
 
+    # -- 设置（data/settings.json > AstrBot 配置） --------------------------
+    def merged_settings(self) -> dict:
+        """合并设置页写入的 data/settings.json 与 AstrBot 插件配置。"""
+
+        try:
+            return self._settings_store.merged(self.config)
+        except VoiceStudioError:
+            logger.warning(
+                "[%s] 读取 data/settings.json 失败，回退到 AstrBot 插件配置", PLUGIN_NAME
+            )
+            return merge_settings({}, self.config)
+
+    def save_settings_payload(self, payload: dict) -> dict:
+        """保存设置页提交的补丁（校验在 settings_store 里做）。"""
+
+        patch = validate_settings_patch(payload)
+        self._settings_store.patch(patch)
+        return self.merged_settings()
+
+    def effective_worker(self) -> dict:
+        merged = self.merged_settings()
+        worker_cfg = merged.get("worker")
+        return dict(worker_cfg) if isinstance(worker_cfg, dict) else {}
+
     # -- 配置解析 -----------------------------------------------------------
     def _provider(self) -> str:
-        provider = conf_str(self.config, "ttsProvider", "indextts") or "indextts"
+        provider = str(self.merged_settings().get("ttsProvider") or "indextts")
         if provider not in tts_providers.PROVIDERS:
             raise VoiceStudioError(
                 f"ttsProvider 配置「{provider}」不可用，可选："
@@ -308,7 +341,11 @@ class VoiceStudioPlugin(Star):
         return provider
 
     def _provider_cfg(self, provider: str) -> dict:
-        return conf_obj(self.config, provider)
+        providers = self.merged_settings().get("providers")
+        if not isinstance(providers, dict):
+            return {}
+        cfg = providers.get(provider)
+        return dict(cfg) if isinstance(cfg, dict) else {}
 
     def _provider_status(self, provider: str) -> tuple[bool, str]:
         meta = tts_providers.PROVIDERS.get(provider)
@@ -322,7 +359,7 @@ class VoiceStudioPlugin(Star):
             return False, "apiKey 未配置"
         if meta["needs_ref"]:
             store = self._store()
-            requested = conf_str(self.config, "defaultVoice", "")
+            requested = str(self.merged_settings().get("defaultVoice") or "")
             if requested:
                 try:
                     store.require(requested)
@@ -331,11 +368,12 @@ class VoiceStudioPlugin(Star):
                 return True, ""
             available = [voice for voice in store.list_voices() if voice.get("available")]
             if not available:
-                return False, "本地提供商需要参考音色，但音色库是空的（/音色导入）"
+                return False, "本地提供商需要参考音色，但音色库是空的（可在设置页上传）"
         return True, ""
 
     def _resolve_ref_voice(self, provider: str, override: str | None) -> dict:
-        requested = str(override or conf_str(self.config, "defaultVoice", "")).strip()
+        default_voice = str(self.merged_settings().get("defaultVoice") or "")
+        requested = str(override or default_voice).strip()
         store = self._store()
         if requested:
             return store.require(requested)
@@ -343,14 +381,15 @@ class VoiceStudioPlugin(Star):
         if not voices:
             raise VoiceStudioError(
                 "本地提供商需要参考音色：音色库是空的。\n"
-                "先用 /音色导入 <本机音频绝对路径> 导入一段参考音频，"
-                "或在配置里把 ttsProvider 换成在线提供商。"
+                "先在「语音工坊」设置页上传参考音频，或用 /音色导入 <本机音频绝对路径>，"
+                "或在设置页把提供商换成在线提供商。"
             )
         return voices[0]
 
     def _resolve_emotion(self, text: str, options: dict) -> dict:
-        mode = conf_str(self.config, "defaultEmotion", "auto") or "auto"
-        base_intensity = conf_float(self.config, "emotionIntensity", 0.6)
+        merged = self.merged_settings()
+        mode = str(merged.get("defaultEmotion") or "auto")
+        base_intensity = conf_float(merged, "emotionIntensity", 0.6)
         result = emotion_mod.resolve_emotion(
             text,
             explicit=options.get("emotion"),
@@ -367,8 +406,81 @@ class VoiceStudioPlugin(Star):
     def _resolve_speed(self, options: dict) -> float:
         speed = options.get("speed")
         if speed is None:
-            speed = conf_float(self.config, "ttsSpeed", 1.0)
+            speed = conf_float(self.merged_settings(), "ttsSpeed", 1.0)
         return max(0.5, min(2.0, float(speed or 1.0)))
+
+    async def synthesize_to_file(
+        self,
+        text: str,
+        *,
+        provider: str | None = None,
+        voice: str | None = None,
+        emotion: str | None = None,
+        intensity: float | None = None,
+        speed: float | None = None,
+    ) -> dict:
+        """合成一段语音到插件 tmp 目录（/朗读 与设置页试听共用）。
+
+        返回 ``{path, format, provider, emotion, emotionApplied}``。
+        """
+
+        provider_id = str(provider or self._provider()).strip()
+        if provider_id not in tts_providers.PROVIDERS:
+            raise VoiceStudioError(
+                f"未知提供商「{provider_id}」，可选："
+                + " / ".join(tts_providers.PROVIDER_IDS)
+            )
+        cfg = dict(self._provider_cfg(provider_id))
+        ref_path: Path | None = None
+        if tts_providers.needs_ref(provider_id):
+            voice_entry = await asyncio.to_thread(
+                self._resolve_ref_voice, provider_id, voice
+            )
+            ref_path = Path(voice_entry["path"])
+        elif voice:
+            cfg["voice"] = str(voice)
+
+        emo = self._resolve_emotion(text, {"emotion": emotion, "intensity": intensity})
+        resolved_speed = self._resolve_speed({"speed": speed})
+        fmt = tts_providers.resolve_format(provider_id, cfg)
+        dest = self._tmp_dir() / f"tts_{int(time.time())}_{uuid.uuid4().hex[:8]}.{fmt}"
+        client = await self._http()
+        result = await tts_providers.synthesize(
+            client,
+            provider_id,
+            cfg,
+            text=text,
+            ref_path=ref_path,
+            emotion=emo,
+            speed=resolved_speed,
+            dest=dest,
+            timeout=conf_float(self.config, "requestTimeoutSec", 600.0),
+        )
+        return {
+            "path": Path(result["path"]),
+            "format": str(result.get("format") or fmt),
+            "provider": provider_id,
+            "emotion": emo,
+            "emotionApplied": bool(result.get("emotionApplied")),
+        }
+
+    async def worker_health(self) -> dict:
+        merged = self.effective_worker()
+        base = worker.normalize_base(str(merged.get("url") or ""))
+        client = await self._http()
+        return await worker.health(client, base, str(merged.get("token") or ""))
+
+    async def worker_process(
+        self, process: str, action: str, port: int | None = None
+    ) -> dict:
+        merged = self.effective_worker()
+        base = worker.normalize_base(str(merged.get("url") or ""))
+        url = f"{base}/v1/process/{process}/{action}"
+        payload = {"port": int(port)} if port else None
+        client = await self._http()
+        return await worker.api_json(
+            client, "POST", url, token=str(merged.get("token") or ""), json=payload
+        )
 
     def _check_allowed(self, event: AstrMessageEvent) -> str | None:
         gid = _group_id(event)
@@ -417,36 +529,13 @@ class VoiceStudioPlugin(Star):
             notice = f"（文本超过 {max_len} 字，已截断）"
 
         try:
-            provider = str(options.get("provider") or self._provider()).strip()
-            if provider not in tts_providers.PROVIDERS:
-                raise VoiceStudioError(
-                    f"未知提供商「{provider}」，可选：" + " / ".join(tts_providers.PROVIDER_IDS)
-                )
-            cfg = dict(self._provider_cfg(provider))
-            ref_path: Path | None = None
-            if tts_providers.needs_ref(provider):
-                voice = await asyncio.to_thread(
-                    self._resolve_ref_voice, provider, options.get("voice")
-                )
-                ref_path = Path(voice["path"])
-            elif options.get("voice"):
-                cfg["voice"] = str(options["voice"])
-
-            emo = self._resolve_emotion(text, options)
-            speed = self._resolve_speed(options)
-            fmt = tts_providers.resolve_format(provider, cfg)
-            dest = self._tmp_dir() / f"tts_{int(time.time())}_{uuid.uuid4().hex[:8]}.{fmt}"
-            client = await self._http()
-            result = await tts_providers.synthesize(
-                client,
-                provider,
-                cfg,
-                text=text,
-                ref_path=ref_path,
-                emotion=emo,
-                speed=speed,
-                dest=dest,
-                timeout=conf_float(self.config, "requestTimeoutSec", 600.0),
+            result = await self.synthesize_to_file(
+                text,
+                provider=options.get("provider"),
+                voice=options.get("voice"),
+                emotion=options.get("emotion"),
+                intensity=options.get("intensity"),
+                speed=options.get("speed"),
             )
             audio_path = await audio.ensure_wav(Path(result["path"]), self._tmp_dir())
             if notice:
@@ -492,8 +581,9 @@ class VoiceStudioPlugin(Star):
             yield event.plain_result(f"❌ 读取音色库失败：{exc.__class__.__name__}: {exc}")
             return
 
-        provider = conf_str(self.config, "ttsProvider", "indextts") or "indextts"
-        default_voice = conf_str(self.config, "defaultVoice", "")
+        merged = self.merged_settings()
+        provider = str(merged.get("ttsProvider") or "indextts")
+        default_voice = str(merged.get("defaultVoice") or "")
 
         if not voices:
             yield event.plain_result(
@@ -621,7 +711,8 @@ class VoiceStudioPlugin(Star):
                 event.stop_event()
             return
 
-        provider = conf_str(self.config, "ttsProvider", "indextts") or "indextts"
+        merged = self.merged_settings()
+        provider = str(merged.get("ttsProvider") or "indextts")
         meta = tts_providers.PROVIDERS.get(provider)
         lines = [f"🩺 语音工坊（AstrBot 独立版 v{PLUGIN_VERSION}）状态"]
 
@@ -640,7 +731,7 @@ class VoiceStudioPlugin(Star):
             lines.append(
                 f"✅ 音色库：{stats['dir']}（{stats['count']} 个，{stats['available']} 个可用）"
             )
-            default_voice = conf_str(self.config, "defaultVoice", "")
+            default_voice = str(merged.get("defaultVoice") or "")
             if default_voice:
                 voice = await asyncio.to_thread(self._store().resolve, default_voice)
                 if voice is None:
@@ -649,8 +740,9 @@ class VoiceStudioPlugin(Star):
             lines.append(f"❌ 音色库：不可用（{exc}）")
 
         try:
-            base = worker.normalize_base(conf_str(self.config, "workerUrl", ""))
-            token = conf_str(self.config, "workerToken", "")
+            worker_cfg = merged.get("worker") if isinstance(merged.get("worker"), dict) else {}
+            base = worker.normalize_base(str(worker_cfg.get("url") or ""))
+            token = str(worker_cfg.get("token") or "")
             client = await self._http()
             health = await worker.health(client, base, token)
             rvc = health.get("rvc") if isinstance(health.get("rvc"), dict) else {}
@@ -714,17 +806,21 @@ class VoiceStudioPlugin(Star):
             )
             return
 
+        worker_settings = self.effective_worker()
         progress = conf_bool(self.config, "sendProgress", True)
         max_duration = max(10, conf_int(self.config, "maxDurationSec", 600))
         job_timeout = max(60, conf_int(self.config, "jobTimeoutSec", 1800))
-        f0_method = conf_str(self.config, "workerF0Method", "rmvpe") or "rmvpe"
-        key_shift = conf_int(self.config, "workerKeyShift", 0)
+        f0_method = str(worker_settings.get("f0Method") or "rmvpe")
+        try:
+            key_shift = int(worker_settings.get("keyShift") or 0)
+        except (TypeError, ValueError):
+            key_shift = 0
         if not model:
-            model = conf_str(self.config, "workerModel", "")
+            model = str(worker_settings.get("model") or "")
 
         try:
-            base = worker.normalize_base(conf_str(self.config, "workerUrl", ""))
-            token = conf_str(self.config, "workerToken", "")
+            base = worker.normalize_base(str(worker_settings.get("url") or ""))
+            token = str(worker_settings.get("token") or "")
             client = await self._http()
             await asyncio.to_thread(self._cleanup_tmp)
 
@@ -791,7 +887,7 @@ class VoiceStudioPlugin(Star):
                 "rms_mix": 0.25,
                 "protect": 0.33,
             }
-            index = conf_str(self.config, "workerIndex", "")
+            index = str(worker_settings.get("index") or "")
             if index:
                 convert_params["index"] = index
             convert_job = await worker.create_job(

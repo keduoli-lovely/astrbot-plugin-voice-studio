@@ -1,0 +1,274 @@
+/* 语音工坊设置页样式：无第三方依赖，跟随 AstrBot 亮/暗主题。 */
+
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #1f2329;
+  --muted: #6b7280;
+  --border: #e3e6ea;
+  --primary: #2f6fed;
+  --primary-text: #ffffff;
+  --danger: #d33b3b;
+  --ok: #1f9d55;
+  --input-bg: #ffffff;
+  --code-bg: #f0f2f5;
+  --radius: 10px;
+}
+
+[data-theme="dark"] {
+  --bg: #16181d;
+  --card: #1e2128;
+  --text: #e7e9ee;
+  --muted: #9aa1ad;
+  --border: #2e333d;
+  --primary: #5b8ef5;
+  --primary-text: #ffffff;
+  --danger: #f07373;
+  --ok: #4cc38a;
+  --input-bg: #23272f;
+  --code-bg: #262b34;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 24px 20px 48px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.page-header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+}
+
+.subtitle,
+.hint {
+  color: var(--muted);
+}
+
+.subtitle {
+  margin: 0;
+}
+
+.layout {
+  display: grid;
+  gap: 18px;
+  max-width: 1040px;
+  margin: 20px auto 0;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.hint {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+}
+
+code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.row.wrap {
+  flex-wrap: wrap;
+}
+
+.grow {
+  flex: 1 1 220px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.field > span {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+  outline: none;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--primary);
+}
+
+input[type="file"] {
+  padding: 5px;
+  background: transparent;
+  border: 1px dashed var(--border);
+}
+
+input[readonly] {
+  opacity: 0.75;
+}
+
+.btn {
+  padding: 7px 14px;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  border-color: var(--primary);
+}
+
+.btn.primary {
+  color: var(--primary-text);
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.btn.ghost {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.btn.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.provider-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.provider-fields .field {
+  min-width: 0;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 12.5px;
+  min-height: 18px;
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.err {
+  color: var(--danger);
+}
+
+.voice-list {
+  display: grid;
+  gap: 8px;
+}
+
+.voice-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.voice-item .voice-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.voice-item .voice-meta {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.voice-item .spacer {
+  flex: 1;
+}
+
+.badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.badge.missing {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.output {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--code-bg);
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+audio {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.empty {
+  padding: 14px;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  text-align: center;
+}

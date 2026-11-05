@@ -1,18 +1,20 @@
 name: astrbot_plugin_voice_studio
 display_name: 语音工坊
-short_desc: 独立版多提供商 TTS + 本机参考音色库 + 情绪 + RVC 翻唱，直接发 QQ 语音条。
+short_desc: 独立版多提供商 TTS + 音色库设置页 + 情绪 + RVC 翻唱，直接发 QQ 语音条。
 desc: |
   AstrBot 原生的语音工坊插件，不依赖 DSH，TTS 由插件自己直接请求各提供商 HTTP API：
 
   - 多提供商 TTS：本地 IndexTTS（Gradio 5）/ GPT-SoVITS（api_v2），
     在线 SiliconFlow / MiniMax / MiMo / OpenAI 兼容 /v1/audio/speech。
-  - 本机参考音色库（data/voices/）：/音色、/音色导入、/音色删除。
+  - 可视化设置页「语音工坊」：选哪个提供商只显示哪一组配置；音色库列表/上传/删除/设为默认；
+    翻唱 worker 配置与连接测试；短文本试听。
+  - 本机参考音色库（data/voices/）：设置页上传，或 /音色、/音色导入、/音色删除 命令。
   - 情绪：内置中英文关键词词典 + /朗读 -e happy -i 0.8 显式指定，
     按提供商映射（IndexTTS 8 维向量 / MiniMax 枚举 / CosyVoice 与 MiMo 提示前缀）。
   - 翻唱：只依赖独立的 rvc-worker（分离 + 换声），插件本地做 RMS 对齐与
     峰值归一化混音后发送；不安装 torch / RVC 依赖。
   - 发送：AstrBot OneBot v11 适配器 + Record 语音条。
-version: 0.2.0
+version: 0.3.0
 author: keduoli-lovely
 repo: https://github.com/keduoli-lovely/astrbot-plugin-voice-studio
 astrbot_version: ">=4.0.0"

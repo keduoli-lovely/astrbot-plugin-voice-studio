@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 PLUGIN_NAME = "astrbot_plugin_voice_studio"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 
 #: 可导入音色库的参考音频后缀（索引/GPT-SoVITS 对 wav 兼容最好，其余也可）
 REF_AUDIO_SUFFIXES = {
