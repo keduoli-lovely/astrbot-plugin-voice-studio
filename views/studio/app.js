@@ -477,7 +477,7 @@ async function testWorker() {
     );
     setStatus("worker-status", "连接成功", "ok");
   } catch (error) {
-    setStatus("worker-status", "连接失败：" + errorText(error), "err");
+    setStatus("worker-status", "翻唱 worker 连接失败：" + errorText(error), "err");
   } finally {
     button.disabled = false;
   }
@@ -515,7 +515,7 @@ async function preview() {
       emotion: $("preview-emotion").value || "auto",
     };
     const result = await bridge.apiPost("test", payload);
-    if (!result || !result.data) throw new Error("后端没有返回音频数据");
+    if (!result || !result.data) throw new Error("后端没有返回音频数据（可能音频过大被截断，请缩短文本后重试）");
     $("preview-audio").src = "data:" + (result.mime || "audio/wav") + ";base64," + result.data;
     setStatus(
       "preview-status",
@@ -525,7 +525,7 @@ async function preview() {
     const player = $("preview-audio");
     if (player && typeof player.play === "function") player.play().catch(function () {});
   } catch (error) {
-    setStatus("preview-status", "试听失败：" + errorText(error), "err");
+    setStatus("preview-status", "语音合成试听失败：" + errorText(error), "err");
   } finally {
     button.disabled = false;
   }

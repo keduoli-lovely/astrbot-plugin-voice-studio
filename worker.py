@@ -43,6 +43,11 @@ def _brief(value: object, size: int = 300) -> str:
 
 
 def _error_text(url: str, status: int, data: object) -> str:
+    if status == 401:
+        return (
+            "翻唱 worker 连接失败：缺少或无效的 Bearer token（HTTP 401）。"
+            "请把设置页「Worker Token」与 worker 启动参数 --token 填成同一个值。"
+        )
     if isinstance(data, dict):
         error = data.get("error")
         if isinstance(error, dict):

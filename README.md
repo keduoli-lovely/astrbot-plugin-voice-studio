@@ -379,6 +379,22 @@ python -B tests/real_indextts.py
 
 ---
 
+## 十三点五、通用部署说明（别人也适用）
+
+这个插件不假设任何人的机器和作者一样，所有地址/令牌都在设置页里填：
+
+1. **不需要 RVC WebUI**：翻唱只连 `rvc-worker`（RVC/MSST 机器上的独立服务），填 worker 地址即可；
+   没有 worker 时翻唱不可用，但语音合成/音色库/命令都不受影响。
+2. **Worker Token 必须两边一致**：worker 用 `--token`（或 `start-worker.bat` 里的 `RVC_WORKER_TOKEN`）启动，
+   插件设置页的「Worker Token」填同一个值。不一致时页面会提示
+   「翻唱 worker 连接失败：缺少或无效的 Bearer token（HTTP 401）」。
+3. **跨机地址**：TTS/worker 若在不同机器，填 `http://<IP>:<端口>`，不要填 `127.0.0.1`。
+4. **端口**：IndexTTS 默认 7860、GPT-SoVITS api_v2 默认 9880、rvc-worker 默认 7870，均在设置页可改。
+5. **试听限制**：试听文本上限 80 字；若合成音频过大，有 ffmpeg 时自动转 MP3 再回传，
+   否则提示「语音合成试听：音频过大」。正式朗读用 `/朗读`（上限 `maxTextLen`）。
+6. **用户数据位置**：`<AstrBot>/data/plugin_data/astrbot_plugin_voice_studio/`（音色/设置），
+   插件更新或重装不会删除。
+
 ## 十四、故障排查
 
 | 现象 | 排查 |

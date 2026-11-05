@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import uuid
 import mimetypes
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 
-from . import tts_providers, worker
+from . import audio, tts_providers, worker
 from .common import (
     MAX_VOICE_BYTES,
     PLUGIN_NAME,
@@ -61,8 +62,9 @@ except ImportError:  # 旧版 AstrBot / 离线测试：占位，不注册路由
     request = None  # type: ignore[assignment]
 
 
-PREVIEW_MAX_CHARS = 300
-PREVIEW_MAX_BYTES = 4 * 1024 * 1024
+PREVIEW_MAX_CHARS = 80
+PREVIEW_MAX_BYTES = 2_000_000
+PREVIEW_TRANSCODE_ABOVE = 400_000
 PROCESS_ALLOWED = {"rvc-webui": "RVC 进程", "msst": "MSST 进程"}
 ACTION_ALLOWED = {"start", "stop"}
 
@@ -329,14 +331,31 @@ class StudioWebAPI:
             )
             path = Path(result["path"])
             content = path.read_bytes()
+            mime = _mime_for(path)
+            # Large WAV previews get transcoded to MP3 so the dashboard response
+            # stays small enough to reach the sandboxed iframe intact.
+            if len(content) > PREVIEW_TRANSCODE_ABOVE and audio.which("ffmpeg"):
+                tmp_dir = self.plugin._data_dir / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                mp3_path = tmp_dir / f"preview_{uuid.uuid4().hex[:8]}.mp3"
+                ok = await audio.run_ffmpeg(
+                    ["-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
+                     "-c:a", "libmp3lame", "-b:a", "96k", str(mp3_path)]
+                )
+                if ok and mp3_path.is_file() and mp3_path.stat().st_size > 0:
+                    path = mp3_path
+                    content = mp3_path.read_bytes()
+                    mime = "audio/mpeg"
             if len(content) > PREVIEW_MAX_BYTES:
                 return error_response(
-                    "试听音频过大，请缩短文本或换更短的音色", status_code=400
+                    "语音合成试听：音频过大（%.1f MB），请缩短文本或换更短的音色"
+                    % (len(content) / 1048576.0),
+                    status_code=400,
                 )
             return json_response(
                 {
                     "ok": True,
-                    "mime": _mime_for(path),
+                    "mime": mime,
                     "format": result.get("format") or path.suffix.lstrip("."),
                     "data": base64.b64encode(content).decode("ascii"),
                     "provider": result.get("provider"),
