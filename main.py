@@ -224,13 +224,45 @@ def _pick_output(outputs: list, keywords: tuple[str, ...]) -> dict | None:
 
 
 def _resolve_data_dir(plugin_dir: Path) -> Path:
-    """AstrBot plugin data path (survives plugin updates), legacy fallback."""
+    """Resolve AstrBot's plugin data directory so reinstalls never wipe user data.
+
+    Tries the documented helper first, then derives <AstrBot root>/data/plugin_data
+    from the installed package, and only then falls back to the plugin directory.
+    """
+    candidates = []
     try:
         from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-        return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+        candidates.append(Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME)
     except Exception:
-        return plugin_dir / "data"
+        pass
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+        candidates.append(Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME)
+    except Exception:
+        pass
+    try:
+        import astrbot
+
+        root = Path(astrbot.__file__).resolve().parent.parent
+        for name in ("data/plugin_data", "data/plugins_data", "data"):
+            candidate = root / name / PLUGIN_NAME
+            if (root / name).is_dir():
+                candidates.append(candidate)
+                break
+    except Exception:
+        pass
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write-probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            return candidate
+        except Exception:
+            continue
+    return plugin_dir / "data"
 
 
 def _migrate_legacy_data(plugin_dir: Path, data_dir: Path) -> None:
