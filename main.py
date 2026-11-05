@@ -594,6 +594,27 @@ class VoiceStudioPlugin(Star):
         except Exception:  # noqa: BLE001 - 不让钩子影响正常回复
             logger.exception("[%s] 随机语音回复失败", PLUGIN_NAME)
 
+    @filter.on_llm_request()
+    async def inject_voice_hint(self, event: AstrMessageEvent, request) -> None:
+        """开启随机语音后告诉模型：回复会被自动转成语音条，不要拒绝或索要权限。"""
+
+        try:
+            settings = self.merged_settings()
+            if not bool(settings.get("randomVoiceEnabled")):
+                return
+            prompt = getattr(request, "system_prompt", "") or ""
+            if "[语音工坊]" in prompt:
+                return
+            hint = (
+                "\n\n[语音工坊] 你的文字回复会被系统自动合成为语音条发给对方，"
+                "你不需要、也没有能力自己生成音频文件、发送 record 或申请权限。"
+                "不要回答“无法发送语音”“没有音频文件”“需要开启 Python/Shell 权限”之类的话；"
+                "正常用文字回答即可，系统会把这段文字转成语音。"
+            )
+            setattr(request, "system_prompt", str(prompt) + hint)
+        except Exception:  # noqa: BLE001 - 提示注入失败不影响正常对话
+            pass
+
     @filter.on_llm_response()
     async def capture_llm_text(self, event: AstrMessageEvent, response) -> None:
         """记录本轮 LLM 回复文本，供结果装饰阶段优先用语音工坊接管。"""

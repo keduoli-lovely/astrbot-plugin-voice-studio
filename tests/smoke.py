@@ -156,6 +156,13 @@ class FakeFilter:
 
         return decorator
 
+    def on_llm_request(self):
+        def decorator(func):
+            self.hooks.append(func)
+            return func
+
+        return decorator
+
     def command(self, name, alias=None, priority: int = 0):
         def decorator(func):
             self.commands.append((name, set(alias or ())))
@@ -1666,6 +1673,23 @@ class TestRandomVoice(SmokeBase):
         response = types.SimpleNamespace(completion_text="捕获的回复")
         self.run_async(plugin.capture_llm_text(event, response))
         self.assertEqual(getattr(event, "_voice_studio_llm_text"), "捕获的回复")
+
+    def test_voice_hint_injected_when_enabled(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload({"randomVoiceEnabled": True})
+        event = FakeEvent("hi")
+        request = types.SimpleNamespace(system_prompt="你是助手。")
+        self.run_async(plugin.inject_voice_hint(event, request))
+        self.assertIn("[语音工坊]", request.system_prompt)
+        self.assertIn("不要回答", request.system_prompt)
+
+    def test_voice_hint_not_injected_when_disabled(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload({"randomVoiceEnabled": False})
+        event = FakeEvent("hi")
+        request = types.SimpleNamespace(system_prompt="你是助手。")
+        self.run_async(plugin.inject_voice_hint(event, request))
+        self.assertNotIn("[语音工坊]", request.system_prompt)
 
 def main():
     unittest.main(verbosity=2)
