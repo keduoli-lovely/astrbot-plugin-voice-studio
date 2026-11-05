@@ -222,12 +222,40 @@ def _pick_output(outputs: list, keywords: tuple[str, ...]) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+
+def _resolve_data_dir(plugin_dir: Path) -> Path:
+    """AstrBot plugin data path (survives plugin updates), legacy fallback."""
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+        return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+    except Exception:
+        return plugin_dir / "data"
+
+
+def _migrate_legacy_data(plugin_dir: Path, data_dir: Path) -> None:
+    """Copy voices/settings from the old in-plugin-directory data folder once."""
+    legacy = plugin_dir / "data"
+    if legacy == data_dir or not legacy.is_dir():
+        return
+    if (data_dir / "settings.json").exists() or (data_dir / "voices.json").exists():
+        return
+    try:
+        import shutil
+
+        data_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(legacy, data_dir, dirs_exist_ok=True)
+    except Exception:
+        pass
+
+
 class VoiceStudioPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.config = config if config is not None else {}
         self._plugin_dir = Path(__file__).resolve().parent
-        self._data_dir = self._plugin_dir / "data"
+        self._data_dir = _resolve_data_dir(self._plugin_dir)
+        _migrate_legacy_data(self._plugin_dir, self._data_dir)
         self._http_client = None
         self._voice_store: VoiceStore | None = None
         self._settings_store = SettingsStore(self._data_dir / "settings.json")
