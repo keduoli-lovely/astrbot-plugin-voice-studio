@@ -328,10 +328,13 @@ class VoiceStudioPlugin(Star):
         return path
 
     def _voice_dir(self) -> Path:
-        raw = conf_str(self.config, "voiceDir", "data/voices") or "data/voices"
+        raw = conf_str(self.config, "voiceDir", "voices") or "voices"
         path = Path(raw).expanduser()
         if not path.is_absolute():
-            path = self._plugin_dir / path
+            parts = list(path.parts)
+            if parts and parts[0] == "data":
+                parts = parts[1:]
+            path = self._data_dir.joinpath(*parts) if parts else self._data_dir / "voices"
         return path
 
     def _store(self) -> VoiceStore:

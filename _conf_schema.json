@@ -321,9 +321,9 @@
     }
   },
   "voiceDir": {
-    "description": "参考音色库目录",
+    "description": "参考音色目录（相对路径基于插件数据目录；AstrBot 更新插件不会丢失）",
     "type": "string",
-    "default": "data/voices",
+    "default": "voices",
     "hint": "参考音色库目录（相对插件目录）；元数据写在同级 <目录名>.json。设置页上传的音色也存到这里。"
   },
   "workerUrl": {
