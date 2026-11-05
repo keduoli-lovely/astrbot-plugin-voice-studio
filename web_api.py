@@ -163,6 +163,9 @@ class StudioWebAPI:
                     "ok": True,
                     "settings": settings,
                     "providers": provider_meta(),
+                    "dataDir": str(getattr(self.plugin, "_data_dir", "")),
+                    "pluginDir": str(getattr(self.plugin, "plugin_dir", "")),
+                    "voiceDir": str(getattr(self.plugin, "_voice_dir", "")()),
                 }
             )
         except VoiceStudioError as exc:

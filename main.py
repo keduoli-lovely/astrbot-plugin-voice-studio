@@ -231,6 +231,16 @@ def _resolve_data_dir(plugin_dir: Path) -> Path:
     """
     candidates = []
     try:
+        # Typical layout: <AstrBot root>/data/plugins/<plugin dir>; user data must
+        # live outside the plugin directory so reinstalls keep it.
+        for ancestor in plugin_dir.parents:
+            if ancestor.name == "data":
+                candidates.append(ancestor / "plugin_data" / PLUGIN_NAME)
+                candidates.append(ancestor / "plugins_data" / PLUGIN_NAME)
+                break
+    except Exception:
+        pass
+    try:
         from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
         candidates.append(Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME)
