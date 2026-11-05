@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 import uuid
 import mimetypes
 from pathlib import Path
@@ -62,9 +63,9 @@ except ImportError:  # 旧版 AstrBot / 离线测试：占位，不注册路由
     request = None  # type: ignore[assignment]
 
 
-PREVIEW_MAX_CHARS = 80
-PREVIEW_MAX_BYTES = 2_000_000
-PREVIEW_TRANSCODE_ABOVE = 400_000
+PREVIEW_MAX_CHARS = 40
+PREVIEW_MAX_BYTES = 300_000
+PREVIEW_TRANSCODE_ABOVE = 60_000
 PROCESS_ALLOWED = {"rvc-webui": "RVC 进程", "msst": "MSST 进程"}
 ACTION_ALLOWED = {"start", "stop"}
 
@@ -134,6 +135,8 @@ class StudioWebAPI:
             ("voices/upload", self.handle_voice_upload, ["POST"], "上传参考音色"),
             ("voices/import", self.handle_voice_import, ["POST"], "从服务器路径导入参考音色"),
             ("voices/delete", self.handle_voice_delete, ["POST"], "删除参考音色"),
+("voices/rename", self.handle_voice_rename, ["POST"], "重命名参考音色"),
+("tts/health", self.handle_tts_health, ["GET"], "语音合成连接测试"),
             ("voices/audio", self.handle_voice_audio, ["GET"], "播放参考音色"),
             ("test", self.handle_test, ["POST"], "试听合成"),
             ("worker/health", self.handle_worker_health, ["GET"], "rvc-worker 健康检查"),
@@ -274,6 +277,66 @@ class StudioWebAPI:
         except VoiceStudioError as exc:
             return error_response(str(exc), status_code=400)
 
+    async def handle_voice_rename(self):
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象", status_code=400)
+            key = str(payload.get("id") or payload.get("name") or "").strip()
+            new_name = payload.get("newName")
+            if not key:
+                return error_response("缺少音色 id 或名称", status_code=400)
+            entry = await asyncio.to_thread(self._store().rename, key, new_name)
+            return json_response({"ok": True, "voice": entry})
+        except VoiceStudioError as exc:
+            return error_response(str(exc), status_code=400)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[%s] 重命名音色失败", PLUGIN_NAME)
+            return error_response(f"重命名音色失败：{exc.__class__.__name__}: {exc}", status_code=500)
+
+    async def handle_tts_health(self):
+        """语音合成连接测试：本地提供商探测 HTTP，在线提供商只检查 Key。"""
+        try:
+            import httpx
+        except Exception:  # noqa: BLE001
+            return error_response("缺少 httpx 依赖，无法测试连接", status_code=500)
+        try:
+            settings = await asyncio.to_thread(self.plugin.merged_settings)
+            provider = str(request.query.get("provider") or settings.get("ttsProvider") or "indextts")
+            if provider not in tts_providers.PROVIDERS:
+                return error_response(f"未知的 TTS 提供商：{provider}", status_code=400)
+            meta = tts_providers.PROVIDERS[provider]
+            prov = (settings.get("providers") or {}).get(provider) or {}
+            started = time.monotonic()
+            if meta.get("kind") == "online":
+                key = str(prov.get("apiKey") or "").strip()
+                elapsed = int((time.monotonic() - started) * 1000)
+                if not key:
+                    return json_response({"ok": False, "provider": provider, "detail": "在线提供商未填写 API Key", "elapsedMs": elapsed})
+                return json_response({"ok": True, "provider": provider, "detail": "API Key 已配置（在线提供商不发起网络探测）", "elapsedMs": elapsed})
+            base_url = str(prov.get("baseUrl") or "").strip().rstrip("/")
+            if not base_url:
+                return json_response({"ok": False, "provider": provider, "detail": "未填写 baseUrl", "elapsedMs": 0})
+            suffix = "/config" if provider == "indextts" else "/docs"
+            url = base_url + suffix
+            try:
+                async with httpx.AsyncClient(timeout=6.0) as client:
+                    response = await client.get(url)
+                detail = f"GET {url} -> HTTP {response.status_code}"
+                ok = response.status_code < 500
+                if provider == "indextts" and ok and "gen_single" not in response.text:
+                    ok = False
+                    detail += "（响应里没有 gen_single，可能不是 IndexTTS）"
+                return json_response({"ok": ok, "provider": provider, "detail": detail,
+                                      "elapsedMs": int((time.monotonic() - started) * 1000)})
+            except Exception as exc:  # noqa: BLE001
+                return json_response({"ok": False, "provider": provider,
+                                      "detail": f"连接失败：{exc.__class__.__name__}: {exc}",
+                                      "elapsedMs": int((time.monotonic() - started) * 1000)})
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[%s] 测试语音合成连接失败", PLUGIN_NAME)
+            return error_response(f"测试连接失败：{exc.__class__.__name__}: {exc}", status_code=500)
+
     async def handle_voice_audio(self):
         try:
             name = request.query.get("name") if request is not None else None
@@ -334,7 +397,7 @@ class StudioWebAPI:
             mime = _mime_for(path)
             # Large WAV previews get transcoded to MP3 so the dashboard response
             # stays small enough to reach the sandboxed iframe intact.
-            if len(content) > PREVIEW_TRANSCODE_ABOVE and audio.which("ffmpeg"):
+            if len(content) > PREVIEW_TRANSCODE_ABOVE and not str(path.suffix).lower().endswith(".mp3") and audio.which("ffmpeg"):
                 tmp_dir = self.plugin._data_dir / "tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 mp3_path = tmp_dir / f"preview_{uuid.uuid4().hex[:8]}.mp3"
@@ -358,6 +421,7 @@ class StudioWebAPI:
                     "mime": mime,
                     "format": result.get("format") or path.suffix.lstrip("."),
                     "data": base64.b64encode(content).decode("ascii"),
+                    "bytes": len(content),
                     "provider": result.get("provider"),
                     "emotionApplied": bool(result.get("emotionApplied")),
                     "emotion": result.get("emotion"),

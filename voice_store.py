@@ -294,6 +294,28 @@ class VoiceStore:
                 raise
         return entry
 
+    def rename(self, key: str, new_name: str) -> dict:
+        name = str(new_name or "").strip()
+        if not name:
+            raise VoiceStudioError("音色名称不能为空")
+        if len(name) > 60:
+            raise VoiceStudioError("音色名称最多 60 个字符")
+        data = self._read()
+        voices = data.get("voices") or []
+        entry = None
+        for item in voices:
+            if str(item.get("id")) == str(key) or str(item.get("name")) == str(key):
+                entry = item
+                break
+        if entry is None:
+            raise VoiceStudioError(f"音色不存在：{key}")
+        others = [item for item in voices if item is not entry]
+        if any(str(item.get("name")) == name for item in others):
+            name = self._unique_name(name, others)
+        entry["name"] = name
+        self._write(data)
+        return entry
+
     def delete(self, key: str) -> dict:
         """删除一个音色（文件 + 元数据）。"""
 

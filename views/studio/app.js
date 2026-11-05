@@ -312,6 +312,13 @@ function renderVoices() {
     });
     item.appendChild(defaultButton);
 
+    const renameButton = make("button", "btn ghost", "重命名");
+    renameButton.type = "button";
+    renameButton.addEventListener("click", function () {
+      renameVoice(voice, item);
+    });
+    item.appendChild(renameButton);
+
     const deleteButton = make("button", "btn danger", "删除");
     deleteButton.type = "button";
     deleteButton.addEventListener("click", function () {
@@ -320,6 +327,51 @@ function renderVoices() {
     item.appendChild(deleteButton);
     container.appendChild(item);
   });
+}
+
+function renameVoice(voice, item) {
+  const input = make("input", "grow");
+  input.value = voice.name || voice.id;
+  input.maxLength = 60;
+  const save = make("button", "btn primary", "保存");
+  const cancel = make("button", "btn ghost", "取消");
+  item.replaceChildren(input, save, cancel);
+  cancel.addEventListener("click", function () {
+    renderVoices();
+  });
+  save.addEventListener("click", async function () {
+    const name = input.value.trim();
+    if (!name) {
+      setStatus("voice-status", "音色名称不能为空", "err");
+      return;
+    }
+    try {
+      await bridge.apiPost("voices/rename", { id: voice.id, newName: name });
+      setStatus("voice-status", "已重命名为 " + name, "ok");
+      await refreshVoices();
+    } catch (error) {
+      setStatus("voice-status", "重命名失败：" + errorText(error), "err");
+    }
+  });
+}
+
+async function testTts() {
+  const button = $("tts-test");
+  button.disabled = true;
+  setStatus("tts-status", "测试中…");
+  try {
+    const provider = $("provider-select").value;
+    const result = await bridge.apiGet("tts/health", { provider: provider });
+    if (result && result.ok) {
+      setStatus("tts-status", "语音合成连接成功：" + (result.detail || provider), "ok");
+    } else {
+      setStatus("tts-status", "语音合成连接失败：" + ((result && result.detail) || "未知错误"), "err");
+    }
+  } catch (error) {
+    setStatus("tts-status", "语音合成连接失败：" + errorText(error), "err");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderPreviewOptions() {
@@ -500,6 +552,10 @@ async function workerProcess(process, action) {
 
 async function preview() {
   const text = $("preview-text").value.trim();
+  if (text.length > 40) {
+    setStatus("preview-status", "语音合成试听：文本请控制在 40 字以内", "err");
+    return;
+  }
   if (!text) {
     setStatus("preview-status", "请先填写试听文本", "err");
     return;
@@ -515,7 +571,7 @@ async function preview() {
       emotion: $("preview-emotion").value || "auto",
     };
     const result = await bridge.apiPost("test", payload);
-    if (!result || !result.data) throw new Error("后端没有返回音频数据（可能音频过大被截断，请缩短文本后重试）");
+    if (!result || !result.data) throw new Error("后端没有返回音频数据（返回字段：" + Object.keys(result || {}).join(",") + "；请缩短文本后重试）");
     $("preview-audio").src = "data:" + (result.mime || "audio/wav") + ";base64," + result.data;
     setStatus(
       "preview-status",
@@ -547,6 +603,7 @@ function bindEvents() {
     });
   });
   $("preview-btn").addEventListener("click", preview);
+  $("tts-test").addEventListener("click", testTts);
 }
 
 function applyContext(context) {
