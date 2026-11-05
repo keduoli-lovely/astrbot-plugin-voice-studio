@@ -18,7 +18,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from .common import VoiceStudioError, conf_float, conf_int, conf_obj, conf_str
+from .common import VoiceStudioError, conf_bool, conf_float, conf_int, conf_obj, conf_str
 from .tts_providers import PROVIDERS
 
 SETTINGS_VERSION = 1
@@ -205,6 +205,26 @@ def validate_settings_patch(payload: object) -> dict:
         except (TypeError, ValueError) as exc:
             raise VoiceStudioError("ttsSpeed 必须是数字") from exc
         patch["ttsSpeed"] = max(0.5, min(2.0, speed))
+    if "randomVoiceEnabled" in payload:
+        value = payload.get("randomVoiceEnabled")
+        if isinstance(value, bool):
+            patch["randomVoiceEnabled"] = value
+        elif isinstance(value, str):
+            patch["randomVoiceEnabled"] = value.strip().lower() in {"1", "true", "yes", "on", "开启"}
+        else:
+            patch["randomVoiceEnabled"] = bool(value)
+    if "randomVoiceProbability" in payload:
+        try:
+            probability = float(payload.get("randomVoiceProbability"))
+        except (TypeError, ValueError) as exc:
+            raise VoiceStudioError("randomVoiceProbability 必须是数字") from exc
+        patch["randomVoiceProbability"] = max(0.0, min(1.0, probability))
+    if "randomVoiceMaxChars" in payload:
+        try:
+            max_chars = int(payload.get("randomVoiceMaxChars"))
+        except (TypeError, ValueError) as exc:
+            raise VoiceStudioError("randomVoiceMaxChars 必须是整数") from exc
+        patch["randomVoiceMaxChars"] = max(10, min(500, max_chars))
     return patch
 
 
@@ -292,6 +312,27 @@ def merge_settings(stored: dict | None, astrbot_config: object) -> dict:
         0.5,
         2.0,
     )
+    random_voice_enabled = (
+        bool(stored.get("randomVoiceEnabled"))
+        if "randomVoiceEnabled" in stored
+        else conf_bool(config, "randomVoiceEnabled", False)
+    )
+    random_voice_probability = _number(
+        "randomVoiceProbability",
+        stored.get("randomVoiceProbability") if "randomVoiceProbability" in stored else None,
+        conf_float(config, "randomVoiceProbability", 0.15),
+        0.0,
+        1.0,
+    )
+    try:
+        random_voice_max_chars = int(
+            stored.get("randomVoiceMaxChars")
+            if "randomVoiceMaxChars" in stored
+            else conf_int(config, "randomVoiceMaxChars", 80)
+        )
+    except (TypeError, ValueError):
+        random_voice_max_chars = 80
+    random_voice_max_chars = max(10, min(500, random_voice_max_chars))
 
     return {
         "ttsProvider": provider,
@@ -301,6 +342,9 @@ def merge_settings(stored: dict | None, astrbot_config: object) -> dict:
         "defaultEmotion": str(default_emotion or "auto"),
         "emotionIntensity": max(0.0, min(1.0, emotion_intensity)),
         "ttsSpeed": max(0.5, min(2.0, tts_speed)),
+        "randomVoiceEnabled": random_voice_enabled,
+        "randomVoiceProbability": max(0.0, min(1.0, random_voice_probability)),
+        "randomVoiceMaxChars": random_voice_max_chars,
     }
 
 

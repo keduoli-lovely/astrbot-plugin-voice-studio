@@ -331,6 +331,31 @@ audio {
         </div>
       </section>
 
+      <section class="card" id="random-voice-card">
+        <h2>随机语音回复</h2>
+        <p class="hint">开启后，模型会在回复前随机决定用语音代替文字（唱歌不走随机；命令回复也不走随机）。</p>
+        <div class="row wrap">
+          <label class="field">
+            <span>启用</span>
+            <select id="random-voice-enabled">
+              <option value="false">关闭</option>
+              <option value="true">开启</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>概率（0~1）</span>
+            <input id="random-voice-probability" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label class="field">
+            <span>最长字数</span>
+            <input id="random-voice-max-chars" type="number" min="10" max="500" step="1" />
+          </label>
+        </div>
+        <div class="row">
+          <span class="status" id="random-voice-status"></span>
+        </div>
+      </section>
+
       <section class="card" id="voices-card">
         <h2>参考音色库</h2>
         <p class="hint">上传的音频会复制到插件目录 <code>data/voices/</code>，限 30MB，支持 wav/mp3/flac/m4a/ogg/opus/aac。重名会自动加序号。</p>
@@ -491,6 +516,9 @@ const state = {
     defaultEmotion: "auto",
     emotionIntensity: 0.6,
     ttsSpeed: 1.0,
+    randomVoiceEnabled: false,
+    randomVoiceProbability: 0.15,
+    randomVoiceMaxChars: 80,
   },
   providers: {},
   workerModels: { models: [], indexes: [] },
@@ -629,11 +657,27 @@ function renderProviderFields() {
   });
 }
 
+function updateEmotionVisibility() {
+  const provider = $("provider-select").value;
+  const meta = state.providers[provider] || {};
+  const supported = String(meta.supportsEmotion || "none") !== "none";
+  const emotionSelect = $("default-emotion");
+  const intensityInput = $("emotion-intensity");
+  const emotionLabel = emotionSelect ? emotionSelect.closest("label") : null;
+  const intensityLabel = intensityInput ? intensityInput.closest("label") : null;
+  if (emotionLabel) emotionLabel.style.display = supported ? "" : "none";
+  if (intensityLabel) intensityLabel.style.display = supported ? "" : "none";
+}
+
 function fillCommonFields() {
   fillSelect($("default-emotion"), EMOTIONS, state.settings.defaultEmotion || "auto");
   $("emotion-intensity").value = String(state.settings.emotionIntensity ?? 0.6);
   $("tts-speed").value = String(state.settings.ttsSpeed ?? 1.0);
   $("default-voice").value = state.settings.defaultVoice || "";
+  $("random-voice-enabled").value = state.settings.randomVoiceEnabled ? "true" : "false";
+  $("random-voice-probability").value = String(state.settings.randomVoiceProbability ?? 0.15);
+  $("random-voice-max-chars").value = String(state.settings.randomVoiceMaxChars ?? 80);
+  updateEmotionVisibility();
 }
 
 function workerFieldOptions(spec) {
@@ -829,6 +873,9 @@ async function saveSettings() {
         defaultEmotion: $("default-emotion").value,
         emotionIntensity: Number($("emotion-intensity").value),
         ttsSpeed: Number($("tts-speed").value),
+        randomVoiceEnabled: $("random-voice-enabled").value === "true",
+        randomVoiceProbability: Number($("random-voice-probability").value),
+        randomVoiceMaxChars: Number($("random-voice-max-chars").value),
       },
     };
     const result = await bridge.apiPost("settings", payload);

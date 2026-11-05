@@ -115,6 +115,9 @@ const state = {
     defaultEmotion: "auto",
     emotionIntensity: 0.6,
     ttsSpeed: 1.0,
+    randomVoiceEnabled: false,
+    randomVoiceProbability: 0.15,
+    randomVoiceMaxChars: 80,
   },
   providers: {},
   workerModels: { models: [], indexes: [] },
@@ -253,11 +256,27 @@ function renderProviderFields() {
   });
 }
 
+function updateEmotionVisibility() {
+  const provider = $("provider-select").value;
+  const meta = state.providers[provider] || {};
+  const supported = String(meta.supportsEmotion || "none") !== "none";
+  const emotionSelect = $("default-emotion");
+  const intensityInput = $("emotion-intensity");
+  const emotionLabel = emotionSelect ? emotionSelect.closest("label") : null;
+  const intensityLabel = intensityInput ? intensityInput.closest("label") : null;
+  if (emotionLabel) emotionLabel.style.display = supported ? "" : "none";
+  if (intensityLabel) intensityLabel.style.display = supported ? "" : "none";
+}
+
 function fillCommonFields() {
   fillSelect($("default-emotion"), EMOTIONS, state.settings.defaultEmotion || "auto");
   $("emotion-intensity").value = String(state.settings.emotionIntensity ?? 0.6);
   $("tts-speed").value = String(state.settings.ttsSpeed ?? 1.0);
   $("default-voice").value = state.settings.defaultVoice || "";
+  $("random-voice-enabled").value = state.settings.randomVoiceEnabled ? "true" : "false";
+  $("random-voice-probability").value = String(state.settings.randomVoiceProbability ?? 0.15);
+  $("random-voice-max-chars").value = String(state.settings.randomVoiceMaxChars ?? 80);
+  updateEmotionVisibility();
 }
 
 function workerFieldOptions(spec) {
@@ -453,6 +472,9 @@ async function saveSettings() {
         defaultEmotion: $("default-emotion").value,
         emotionIntensity: Number($("emotion-intensity").value),
         ttsSpeed: Number($("tts-speed").value),
+        randomVoiceEnabled: $("random-voice-enabled").value === "true",
+        randomVoiceProbability: Number($("random-voice-probability").value),
+        randomVoiceMaxChars: Number($("random-voice-max-chars").value),
       },
     };
     const result = await bridge.apiPost("settings", payload);

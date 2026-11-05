@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import shutil
 import time
@@ -569,6 +570,64 @@ class VoiceStudioPlugin(Star):
         if gid in allowed:
             return None
         return f"⛔ 本群（{gid}）不在语音工坊白名单里，管理员可在插件配置 allowedGroups 中添加。"
+
+    # -- 钩子：随机语音回复 ------------------------------------------------
+    @filter.on_decorating_result()
+    async def random_voice_hook(self, event: AstrMessageEvent):
+        """开启随机语音后，在纯文本回复前随机改用语音条（命令/唱歌不走随机）。"""
+
+        try:
+            await self._maybe_random_voice(event)
+        except Exception:  # noqa: BLE001 - 不让钩子影响正常回复
+            logger.exception("[%s] 随机语音回复失败", PLUGIN_NAME)
+
+    async def _maybe_random_voice(self, event: AstrMessageEvent) -> None:
+        settings = self.merged_settings()
+        if not bool(settings.get("randomVoiceEnabled")):
+            return
+        if self._check_allowed(event):
+            return
+        message_text = _message_text(event).strip()
+        if not message_text:
+            return
+        # 命令（/朗读、/翻唱 等）本身就会发语音，不走随机替换
+        if message_text.startswith(("/", "／")):
+            return
+        first_token = message_text.split()[0]
+        if first_token in _COMMAND_NAMES:
+            return
+        result = event.get_result()
+        chain = getattr(result, "chain", None) if result is not None else None
+        if not chain:
+            return
+        pieces: list[str] = []
+        for component in chain:
+            text = getattr(component, "text", None)
+            if text is None:
+                return  # 图片 / At / 语音等非纯文本回复保持原样
+            pieces.append(str(text))
+        text = "".join(pieces).strip()
+        limit = int(settings.get("randomVoiceMaxChars") or 80)
+        if len(text) < 2 or len(text) > limit:
+            return
+        probability = float(settings.get("randomVoiceProbability") or 0.0)
+        if probability <= 0 or random.random() >= probability:
+            return
+        provider = str(settings.get("ttsProvider") or "indextts")
+        meta = tts_providers.PROVIDERS.get(provider) or {}
+        supports_emotion = str(meta.get("supports_emotion") or "none") != "none"
+        emotion = str(settings.get("defaultEmotion") or "auto")
+        if not supports_emotion or emotion in ("", "auto"):
+            emotion = None
+        audio_result = await self.synthesize_to_file(
+            text,
+            provider=None,
+            voice=str(settings.get("defaultVoice") or "") or None,
+            emotion=emotion,
+            intensity=float(settings.get("emotionIntensity") or 0.6),
+        )
+        audio_path = await audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir())
+        result.chain = [_record_for(audio_path)]
 
     # -- 命令：/朗读 --------------------------------------------------------
     @filter.command("朗读", alias={"语音说"})

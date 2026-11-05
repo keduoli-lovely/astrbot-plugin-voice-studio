@@ -14,7 +14,7 @@ desc: |
   - 翻唱：只依赖独立的 rvc-worker（分离 + 换声），插件本地做 RMS 对齐与
     峰值归一化混音后发送；不安装 torch / RVC 依赖。
   - 发送：AstrBot OneBot v11 适配器 + Record 语音条。
-version: 0.4.3
+version: 0.4.4
 author: keduoli-lovely
 repo: https://github.com/keduoli-lovely/astrbot-plugin-voice-studio
 astrbot_version: ">=4.0.0"

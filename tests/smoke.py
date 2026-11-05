@@ -106,11 +106,20 @@ class FakeContext:
         )
 
 
+class FakePlain:
+    def __init__(self, text):
+        self.text = str(text)
+
+
 class FakeEvent:
-    def __init__(self, message_str: str = "", group_id: str = ""):
+    def __init__(self, message_str: str = "", group_id: str = "", result=None):
         self.message_str = message_str
         self._group_id = str(group_id or "")
+        self._result = result
         self.stopped = False
+
+    def get_result(self):
+        return self._result
 
     def get_group_id(self):
         return self._group_id
@@ -131,6 +140,14 @@ class FakeEvent:
 class FakeFilter:
     def __init__(self):
         self.commands: list[tuple[str, set[str]]] = []
+        self.hooks: list = []
+
+    def on_decorating_result(self):
+        def decorator(func):
+            self.hooks.append(func)
+            return func
+
+        return decorator
 
     def command(self, name, alias=None, priority: int = 0):
         def decorator(func):
@@ -463,7 +480,7 @@ class TestPluginShape(SmokeBase):
         self.assertTrue(hasattr(MAIN, "VoiceStudioPlugin"))
         self.assertTrue(issubclass(MAIN.VoiceStudioPlugin, FakeStar))
         self.assertIs(MAIN.Record, FakeRecord)
-        self.assertEqual(MAIN.PLUGIN_VERSION, "0.3.0")
+        self.assertEqual(MAIN.PLUGIN_VERSION, "0.4.4")
 
     def test_commands_registered(self):
         registered = {name: alias for name, alias in FILTER.commands}
@@ -1531,6 +1548,63 @@ class TestViews(SmokeBase):
             self.assertFalse(schema[key].get("invisible"), f"{key} 应保持可见")
         text = json.dumps(schema, ensure_ascii=False)
         self.assertNotIn("RVC WebUI", text)
+
+
+class TestRandomVoice(SmokeBase):
+    def test_settings_random_fields_are_validated(self):
+        patch = SETTINGS_MOD.validate_settings_patch(
+            {
+                "randomVoiceEnabled": "true",
+                "randomVoiceProbability": 1.5,
+                "randomVoiceMaxChars": 5,
+            }
+        )
+        self.assertTrue(patch["randomVoiceEnabled"])
+        self.assertEqual(patch["randomVoiceProbability"], 1.0)
+        self.assertEqual(patch["randomVoiceMaxChars"], 10)
+
+    def test_merge_settings_random_defaults(self):
+        merged = SETTINGS_MOD.merge_settings({}, {})
+        self.assertFalse(merged["randomVoiceEnabled"])
+        self.assertAlmostEqual(merged["randomVoiceProbability"], 0.15)
+        self.assertEqual(merged["randomVoiceMaxChars"], 80)
+
+    def test_random_voice_replaces_plain_text_reply(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload(
+            {
+                "randomVoiceEnabled": True,
+                "randomVoiceProbability": 1.0,
+                "randomVoiceMaxChars": 80,
+            }
+        )
+        plugin._tmp_dir().mkdir(parents=True, exist_ok=True)
+        result = types.SimpleNamespace(chain=[FakePlain("你好")])
+        event = FakeEvent("hi", result=result)
+
+        async def fake_synthesize(text, **kwargs):
+            dest = plugin._tmp_dir() / "random_voice.wav"
+            write_wav(dest, channels=1, sample_rate=22050, seconds=0.1, freq=440, amp=0.2)
+            return {"path": dest, "format": "wav"}
+
+        with mock.patch.object(MAIN.VoiceStudioPlugin, "synthesize_to_file", side_effect=fake_synthesize):
+            self.run_async(plugin._maybe_random_voice(event))
+        self.assertEqual(len(result.chain), 1)
+        self.assertIsInstance(result.chain[0], MAIN.Record)
+
+    def test_random_voice_skips_commands(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload(
+            {
+                "randomVoiceEnabled": True,
+                "randomVoiceProbability": 1.0,
+                "randomVoiceMaxChars": 80,
+            }
+        )
+        result = types.SimpleNamespace(chain=[FakePlain("/朗读 你好")])
+        event = FakeEvent("/朗读 你好", result=result)
+        self.run_async(plugin._maybe_random_voice(event))
+        self.assertIsInstance(result.chain[0], FakePlain)
 
 
 def main():
