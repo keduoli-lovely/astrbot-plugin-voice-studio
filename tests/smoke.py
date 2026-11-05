@@ -1757,6 +1757,30 @@ class TestRandomVoice(SmokeBase):
         self.run_async(plugin.inject_voice_hint(event, request))
         self.assertIn("/唱歌", request.system_prompt)
 
+    def test_message_audio_source_local_file(self):
+        path = write_wav(self.tmp / "song.wav", seconds=0.1)
+        record_type = type("Record", (), {})
+        component = record_type()
+        component.file = str(path)
+        event = FakeEvent("")
+        event.message_obj = types.SimpleNamespace(message=[component])
+        self.assertEqual(str(MAIN._message_audio_source(event)), str(path))
+
+    def test_message_audio_source_url(self):
+        file_type = type("File", (), {})
+        component = file_type()
+        component.file = ""
+        component.url = "https://example.com/song.mp3"
+        event = FakeEvent("")
+        event.message_obj = types.SimpleNamespace(message=[component])
+        self.assertEqual(MAIN._message_audio_source(event), "https://example.com/song.mp3")
+
+    def test_cover_usage_asks_for_song(self):
+        plugin = make_plugin()
+        event, results = self.run_handler(plugin, "cover_cmd", "")
+        joined = " ".join(str(item[1]) for item in results if isinstance(item, tuple))
+        self.assertIn("再发送 /唱歌", joined)
+
 def main():
     unittest.main(verbosity=2)
 

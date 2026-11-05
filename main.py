@@ -128,6 +128,31 @@ def _group_id(event: AstrMessageEvent) -> str:
     return str(gid or "")
 
 
+def _message_audio_source(event: AstrMessageEvent) -> Path | str | None:
+    """从消息里取出音频附件：优先本地文件路径，其次远程 URL。"""
+
+    message_obj = getattr(event, "message_obj", None)
+    components = getattr(message_obj, "message", None) or []
+    for component in components:
+        name = type(component).__name__
+        if name not in {"Record", "File", "Video", "Audio", "Voice"}:
+            continue
+        for attr in ("file", "path"):
+            value = getattr(component, attr, None)
+            if not value:
+                continue
+            try:
+                path = Path(str(value))
+                if path.is_file():
+                    return path
+            except OSError:
+                continue
+        url = getattr(component, "url", None)
+        if url and str(url).lower().startswith(("http://", "https://")):
+            return str(url)
+    return None
+
+
 def _command_arg(message_str: str) -> str:
     """去掉唤醒前缀与命令名，返回命令后面的原始文本。"""
 
@@ -638,7 +663,8 @@ class VoiceStudioPlugin(Star):
                 "你不需要、也没有能力自己生成音频文件、发送 record 或申请权限。"
                 "不要回答“无法发送语音”“没有音频文件”“需要开启 Python/Shell 权限”之类的话；"
                 "正常用文字回答即可，系统会把这段文字转成语音。"
-                "当用户要求唱歌/翻唱时，你要说明需要歌曲文件，并使用 /唱歌 <歌曲绝对路径>（RVC 翻唱）；"
+                "当用户要求唱歌/翻唱时，你要先请用户发送一首歌的音频文件（或提供歌曲绝对路径），"
+                "然后让用户发送 /唱歌 命令，系统会用 RVC 翻唱；"
                 "不要用文字歌词代替唱歌，也不要声称自己现在就能唱。"
             )
             setattr(request, "system_prompt", str(prompt) + hint)
@@ -1041,20 +1067,40 @@ class VoiceStudioPlugin(Star):
             return
 
         raw = _command_arg(_message_text(event))
-        if not raw:
+        model = ""
+        song_raw = ""
+        attachment = _message_audio_source(event)
+        if raw:
+            song_raw, model = split_cover_args(raw)
+        elif attachment is not None:
+            if isinstance(attachment, Path):
+                song_raw = str(attachment)
+            else:
+                try:
+                    client = await self._http()
+                    response = await client.get(str(attachment), timeout=120.0)
+                    response.raise_for_status()
+                    suffix = Path(str(attachment).split("?")[0]).suffix or ".mp3"
+                    dest = self._tmp_dir() / f"cover_input_{uuid.uuid4().hex[:8]}{suffix}"
+                    dest.write_bytes(response.content)
+                    song_raw = str(dest)
+                except Exception as exc:  # noqa: BLE001
+                    yield event.plain_result(f"❌ 下载歌曲失败：{exc.__class__.__name__}: {exc}")
+                    return
+        else:
             yield event.plain_result(
-                "用法：/翻唱 <歌曲绝对路径> [模型]\n"
-                '例如：/翻唱 "C:\\music\\song.mp3"\n'
+                "用法：先发一首歌的音频，再发送 /唱歌（也可以用 /唱歌 <歌曲绝对路径>）\n"
+                '例如：/唱歌 "C:\\music\\song.mp3"\n'
                 "提示：路径有空格时用英文引号包住；模型留空则用配置 workerModel，"
                 "再留空则用 worker 上的第一个模型。"
             )
             return
 
-        song_raw, model = split_cover_args(raw)
         song_path = Path(song_raw).expanduser()
         if not song_path.is_absolute():
             yield event.plain_result(f"❌ 请给歌曲的绝对路径（收到：{song_raw}）")
             return
+        song_path = song_path.resolve()
         try:
             is_file = song_path.is_file()
         except OSError:
