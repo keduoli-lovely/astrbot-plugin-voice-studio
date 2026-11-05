@@ -357,7 +357,6 @@ audio {
           </label>
         </div>
         <div class="row wrap">
-          <button class="btn primary" id="random-voice-save" type="button">保存</button>
           <span class="hint-inline">修改后会自动保存</span>
           <span class="status" id="random-voice-status"></span>
         </div>
@@ -1052,7 +1051,6 @@ function bindEvents() {
   });
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
-  on("random-voice-save", saveRandomVoice);
   ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars"].forEach(function (id) {
     const node = $(id);
     if (node) node.addEventListener("change", saveRandomVoice);

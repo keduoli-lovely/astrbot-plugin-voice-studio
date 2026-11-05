@@ -644,7 +644,6 @@ function bindEvents() {
   });
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
-  on("random-voice-save", saveRandomVoice);
   ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars"].forEach(function (id) {
     const node = $(id);
     if (node) node.addEventListener("change", saveRandomVoice);
