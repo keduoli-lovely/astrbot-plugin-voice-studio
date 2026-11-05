@@ -988,8 +988,8 @@ async function workerProcess(process, action) {
 
 async function preview() {
   const text = $("preview-text").value.trim();
-  if (text.length > 40) {
-    setStatus("preview-status", "语音合成试听：文本请控制在 40 字以内", "err");
+  if (text.length > 20) {
+    setStatus("preview-status", "语音合成试听：文本请控制在 20 字以内", "err");
     return;
   }
   if (!text) {
