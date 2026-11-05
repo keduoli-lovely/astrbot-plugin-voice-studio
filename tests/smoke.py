@@ -1,24 +1,27 @@
-"""语音工坊 AstrBot 插件的冒烟测试（本机没有 AstrBot，全部用 mock）。
+"""语音工坊 AstrBot 插件冒烟测试（无 AstrBot、无网络、无真实提供商）。
 
 运行：
     python tests/smoke.py
 
 覆盖：
-1. 在伪 AstrBot（Star / filter / 事件 / 消息组件）环境下能 import main.py；
-2. 4 个中文命令被 @filter.command 注册（含 /语音说 别名）；
-3. HTTP 客户端按配置构造：httpx.AsyncClient、超时、Bearer 头、URL 归一化；
-4. /朗读 真的 POST 到 `/tts-studio/api/tts`，参数名是 voiceId / sendToQQ=false；
-5. TTS 返回远程 url 时能流式下载（跨机部署回退路径）；
-6. 群白名单拦截；
-7. /音色、/语音状态 的输出；
-8. WAV 混音（RMS 对齐 + 峰值归一化）与 /翻唱 全链路（fake worker）。
-
-注意：脚本会把伪造的 `astrbot` / `httpx` 模块写进 sys.modules，只影响本进程。
+1. 在伪 AstrBot（Star / filter / 事件 / Record）环境下能加载插件包（相对导入正常）；
+2. 6 个中文命令注册（朗读 + 语音说别名、翻唱、音色、音色导入、音色删除、语音状态）；
+3. 插件是**独立的**：源码里没有 DSH 路由 / voiceStudioUrl 之类的引用；
+4. 参数解析（/朗读 选项、/音色导入、/音色删除 --yes、/翻唱 引号路径）；
+5. 情绪：内置词典、显式指定、8 维向量 / MiniMax 枚举 / CosyVoice 前缀 / MiMo 风格；
+6. 音色库：导入（复制）、重名自动加序号、列表、按名称/id/文件名解析、删除、后缀/大小校验；
+7. 6 个 TTS 提供商的请求 URL / 方法 / 请求体 / 鉴权头（httpx 全 mock）：
+   indextts（Gradio 上传+call+SSE+file 下载）、gptsovits（GET /tts）、
+   siliconflow、minimax（hex）、mimo（base64）、openai；
+8. /朗读 全链路（provider mock）→ Record 发送；
+9. /语音状态 → 检查插件自身配置 + worker /v1/health；
+10. /翻唱 全链路（fake worker：上传→分离→下载→换声→混音→Record）与混音质量。
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import json
 import math
@@ -32,41 +35,46 @@ from pathlib import Path
 from unittest import mock
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
-MAIN_PATH = PLUGIN_DIR / "main.py"
+PKG = "vs_plugin_under_test"
 
 
 # ---------------------------------------------------------------------------
-# 伪造 AstrBot / httpx
+# 伪造 AstrBot
 # ---------------------------------------------------------------------------
 
 
 class FakeConfig(dict):
-    """AstrBotConfig 是 dict 子类，这里只用到字典行为。"""
+    pass
 
 
 class FakeLogger:
     def __init__(self):
-        self.lines: list[str] = []
+        self.lines: list[tuple[str, str]] = []
 
     def debug(self, message, *args):
-        self.lines.append(("debug", str(message) % args if args else str(message)))
+        self.lines.append(("debug", _fmt(message, args)))
 
     def info(self, message, *args):
-        self.lines.append(("info", str(message) % args if args else str(message)))
+        self.lines.append(("info", _fmt(message, args)))
 
     def warning(self, message, *args):
-        self.lines.append(("warning", str(message) % args if args else str(message)))
+        self.lines.append(("warning", _fmt(message, args)))
 
     def error(self, message, *args):
-        self.lines.append(("error", str(message) % args if args else str(message)))
+        self.lines.append(("error", _fmt(message, args)))
 
     def exception(self, message, *args):
-        self.lines.append(("exception", str(message) % args if args else str(message)))
+        self.lines.append(("exception", _fmt(message, args)))
+
+
+def _fmt(message, args) -> str:
+    try:
+        return str(message) % args if args else str(message)
+    except TypeError:
+        return f"{message} {args}"
 
 
 class FakeRecord:
-    """伪造 astrbot.api.message_components.Record。"""
-
     def __init__(self, file: str = "", url: str = "", path: str = "", **_):
         self.file = file
         self.url = url
@@ -74,7 +82,7 @@ class FakeRecord:
 
     @classmethod
     def fromFileSystem(cls, path):
-        return cls(file=f"file:///{Path(path).as_posix().lstrip('/')}", path=str(path))
+        return cls(file=str(path), path=str(path))
 
 
 class FakeStar:
@@ -87,8 +95,6 @@ class FakeContext:
 
 
 class FakeEvent:
-    """伪造 AstrMessageEvent：命令 handler 用到的接口都在这里。"""
-
     def __init__(self, message_str: str = "", group_id: str = ""):
         self.message_str = message_str
         self._group_id = str(group_id or "")
@@ -96,9 +102,6 @@ class FakeEvent:
 
     def get_group_id(self):
         return self._group_id
-
-    def get_sender_id(self):
-        return "10000"
 
     def get_sender_name(self):
         return "tester"
@@ -127,16 +130,54 @@ class FakeFilter:
         return decorator
 
 
+FILTER = FakeFilter()
+LOGGER = FakeLogger()
+
+
+def install_fake_astrbot():
+    astrbot_mod = types.ModuleType("astrbot")
+    api_mod = types.ModuleType("astrbot.api")
+    api_mod.AstrBotConfig = FakeConfig
+    api_mod.logger = LOGGER
+    event_mod = types.ModuleType("astrbot.api.event")
+    event_mod.AstrMessageEvent = FakeEvent
+    event_mod.filter = FILTER
+    components_mod = types.ModuleType("astrbot.api.message_components")
+    components_mod.Record = FakeRecord
+    star_mod = types.ModuleType("astrbot.api.star")
+    star_mod.Context = FakeContext
+    star_mod.Star = FakeStar
+    sys.modules.update(
+        {
+            "astrbot": astrbot_mod,
+            "astrbot.api": api_mod,
+            "astrbot.api.event": event_mod,
+            "astrbot.api.message_components": components_mod,
+            "astrbot.api.star": star_mod,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# 伪造 httpx
+# ---------------------------------------------------------------------------
+
+
 class _FakeTimeout:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
 
-class FakeHTTPResponse:
-    def __init__(self, status_code: int = 200, payload=None, body: bytes = b""):
+class FakeResponse:
+    def __init__(self, status_code: int = 200, payload=None, content: bytes = b"", text: str | None = None):
         self.status_code = status_code
         self._payload = payload
-        self._body = body
+        self.content = content if isinstance(content, bytes) else bytes(content or b"")
+        self._text = text if text is not None else self.content.decode("utf-8", "ignore")
+
+    @property
+    def text(self) -> str:
+        return self._text
 
     def json(self):
         if self._payload is None:
@@ -144,15 +185,15 @@ class FakeHTTPResponse:
         return self._payload
 
     async def aread(self):
-        return self._body
+        return self.content
 
     async def aiter_bytes(self, chunk_size: int = 65536):
-        for start in range(0, len(self._body), chunk_size):
-            yield self._body[start:start + chunk_size]
+        for start in range(0, len(self.content), chunk_size):
+            yield self.content[start:start + chunk_size]
 
 
 class _FakeStream:
-    def __init__(self, response: FakeHTTPResponse):
+    def __init__(self, response: FakeResponse):
         self._response = response
 
     async def __aenter__(self):
@@ -163,30 +204,23 @@ class _FakeStream:
 
 
 class FakeAsyncClient:
-    """伪造 httpx.AsyncClient，记录请求；响应由测试里的 handler 决定。"""
-
     instances: list["FakeAsyncClient"] = []
-    request_handler = None  # type: ignore[assignment]
-    stream_handler = None  # type: ignore[assignment]
 
-    def __init__(self, **kwargs):
+    def __init__(self, handler=None, **kwargs):
+        self.handler = handler
         self.kwargs = kwargs
         self.requests: list[dict] = []
-        self.streams: list[dict] = []
         self.closed = False
         FakeAsyncClient.instances.append(self)
 
     async def request(self, method, url, **kwargs):
         self.requests.append({"method": method, "url": url, "kwargs": kwargs})
-        handler = FakeAsyncClient.request_handler
-        if handler is None:
-            return FakeHTTPResponse(200, {})
-        return handler(method, url, kwargs)
+        if self.handler is None:
+            return FakeResponse(200, {})
+        return self.handler(self, method, url, kwargs)
 
     def stream(self, method, url, **kwargs):
-        self.streams.append({"method": method, "url": url, "kwargs": kwargs})
-        handler = FakeAsyncClient.stream_handler
-        response = FakeHTTPResponse(200, {}, b"") if handler is None else handler(method, url, kwargs)
+        response = self.handler(self, method, url, kwargs) if self.handler else FakeResponse(200, {}, b"")
         return _FakeStream(response)
 
     async def aclose(self):
@@ -197,50 +231,44 @@ class FakeHTTPError(Exception):
     pass
 
 
-def install_fake_modules():
-    """把伪造的 astrbot / httpx 注入 sys.modules。"""
-
-    filter_namespace = FakeFilter()
-
-    astrbot_mod = types.ModuleType("astrbot")
-    api_mod = types.ModuleType("astrbot.api")
-    api_mod.AstrBotConfig = FakeConfig
-    api_mod.logger = FakeLogger()
-    event_mod = types.ModuleType("astrbot.api.event")
-    event_mod.AstrMessageEvent = FakeEvent
-    event_mod.filter = filter_namespace
-    components_mod = types.ModuleType("astrbot.api.message_components")
-    components_mod.Record = FakeRecord
-    star_mod = types.ModuleType("astrbot.api.star")
-    star_mod.Context = FakeContext
-    star_mod.Star = FakeStar
-
+def install_fake_httpx():
     httpx_mod = types.ModuleType("httpx")
     httpx_mod.AsyncClient = FakeAsyncClient
     httpx_mod.Timeout = _FakeTimeout
     httpx_mod.HTTPError = FakeHTTPError
+    sys.modules["httpx"] = httpx_mod
 
-    sys.modules.update(
-        {
-            "astrbot": astrbot_mod,
-            "astrbot.api": api_mod,
-            "astrbot.api.event": event_mod,
-            "astrbot.api.message_components": components_mod,
-            "astrbot.api.star": star_mod,
-            "httpx": httpx_mod,
-        }
+
+# ---------------------------------------------------------------------------
+# 加载插件包（相对导入需要包上下文）
+# ---------------------------------------------------------------------------
+
+
+def load_plugin_package():
+    for name in list(sys.modules):
+        if name == PKG or name.startswith(PKG + "."):
+            del sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        PKG, PLUGIN_DIR / "__init__.py", submodule_search_locations=[str(PLUGIN_DIR)]
     )
-    return filter_namespace
+    package = importlib.util.module_from_spec(spec)
+    sys.modules[PKG] = package
+    spec.loader.exec_module(package)
+    main_spec = importlib.util.spec_from_file_location(f"{PKG}.main", PLUGIN_DIR / "main.py")
+    main = importlib.util.module_from_spec(main_spec)
+    sys.modules[f"{PKG}.main"] = main
+    main_spec.loader.exec_module(main)
+    return main
 
 
-def load_main_module():
-    spec = importlib.util.spec_from_file_location("astrbot_plugin_voice_studio_main", str(MAIN_PATH))
-    if spec is None or spec.loader is None:  # pragma: no cover
-        raise RuntimeError(f"无法加载 {MAIN_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+install_fake_astrbot()
+install_fake_httpx()
+MAIN = load_plugin_package()
+EMOTION = sys.modules[f"{PKG}.emotion"]
+VOICE_MOD = sys.modules[f"{PKG}.voice_store"]
+TTS = MAIN.tts_providers
+AUDIO = MAIN.audio
+WORKER = MAIN.worker
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +276,7 @@ def load_main_module():
 # ---------------------------------------------------------------------------
 
 
-def write_wav(path: Path, *, channels: int, sample_rate: int, seconds: float, freq: float, amp: float) -> Path:
+def write_wav(path: Path, *, channels=1, sample_rate=22050, seconds=0.2, freq=440, amp=0.2) -> Path:
     frames = int(sample_rate * seconds)
     data = bytearray()
     for index in range(frames):
@@ -263,350 +291,796 @@ def write_wav(path: Path, *, channels: int, sample_rate: int, seconds: float, fr
     return path
 
 
+def make_plugin(**overrides):
+    config = {
+        "ttsProvider": "indextts",
+        "indextts": {"baseUrl": "http://127.0.0.1:7860", "lang": "ZH", "emoWeight": 0.8, "durationFactor": 1.0},
+        "gptsovits": {"baseUrl": "http://127.0.0.1:9880", "textLang": "zh", "promptText": "", "promptLang": "zh", "speed": 1.0},
+        "siliconflow": {
+            "baseUrl": "https://api.siliconflow.cn/v1",
+            "apiKey": "sk-test",
+            "model": "FunAudioLLM/CosyVoice2-0.5B",
+            "voice": "speech:auto",
+            "format": "wav",
+        },
+        "minimax": {
+            "baseUrl": "https://api.minimax.chat/v1",
+            "apiKey": "mm-test",
+            "groupId": "g1",
+            "model": "speech-02-hd",
+            "voice": "female-shaonv",
+            "format": "mp3",
+        },
+        "mimo": {"baseUrl": "https://mimo.example/v1", "apiKey": "mimo-test", "model": "mimo-v2.5-tts", "voice": "v1", "format": "wav", "style": ""},
+        "openai": {"baseUrl": "https://api.openai.com/v1", "apiKey": "oa-test", "model": "gpt-4o-mini-tts", "voice": "alloy", "format": "mp3", "emotionInstructions": True},
+        "defaultVoice": "",
+        "defaultEmotion": "auto",
+        "emotionIntensity": 0.6,
+        "ttsSpeed": 1.0,
+        "voiceDir": str(Path(tempfile.mkdtemp(prefix="vs_voices_"))),
+        "workerUrl": "http://127.0.0.1:7870",
+        "workerToken": "worker-token",
+        "workerModel": "test.pth",
+        "workerIndex": "",
+        "workerF0Method": "rmvpe",
+        "workerKeyShift": 3,
+        "allowedGroups": [],
+        "maxTextLen": 1000,
+        "maxDurationSec": 600,
+        "jobTimeoutSec": 60,
+        "requestTimeoutSec": 60,
+        "sendProgress": True,
+    }
+    config.update(overrides)
+    return MAIN.VoiceStudioPlugin(FakeContext(), config)
+
+
+async def collect(generator):
+    results = []
+    async for item in generator:
+        results.append(item)
+    return results
+
+
 class SmokeBase(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.filter_namespace = install_fake_modules()
-        cls.main = load_main_module()
-        cls.tmp = Path(tempfile.mkdtemp(prefix="vs_smoke_"))
+    def setUp(self):
+        FakeAsyncClient.instances.clear()
+        self.tmp = Path(tempfile.mkdtemp(prefix="vs_smoke_"))
 
-    def make_plugin(self, **overrides):
-        config = {
-            "voiceStudioUrl": "127.0.0.1:9999",
-            "voiceStudioToken": "voice-token",
-            "workerUrl": "http://127.0.0.1:7870/",
-            "workerToken": "worker-token",
-            "defaultProvider": "indextts",
-            "defaultVoice": "voice-1",
-            "defaultEmotion": "happy:0.8",
-            "allowedGroups": [],
-            "maxDurationSec": 600,
-            "maxTextLen": 1000,
-            "jobTimeoutSec": 60,
-            "requestTimeoutSec": 60,
-            "sendProgress": True,
-            "workerModel": "test.pth",
-            "workerIndex": "",
-            "workerF0Method": "rmvpe",
-            "workerKeyShift": 3,
-        }
-        config.update(overrides)
-        return self.main.VoiceStudioPlugin(FakeContext(), config)
+    def run_async(self, coro):
+        return asyncio.run(coro)
 
-    async def collect(self, generator):
-        results = []
-        async for item in generator:
-            results.append(item)
-        return results
+    def run_handler(self, plugin, method, message_str, group_id=""):
+        event = FakeEvent(message_str, group_id)
+        results = self.run_async(collect(getattr(plugin, method)(event)))
+        return event, results
 
 
 # ---------------------------------------------------------------------------
-# 测试
+# 1/2/3. 导入、命令注册、独立性
 # ---------------------------------------------------------------------------
 
 
-class TestImportsAndRegistration(SmokeBase):
-    def test_import_paths_are_the_documented_ones(self):
-        # main.py 顶部 import 走的是文档里的 astrbot.api.* 路径；能 import 即说明路径正确。
-        self.assertTrue(hasattr(self.main, "VoiceStudioPlugin"))
-        self.assertTrue(issubclass(self.main.VoiceStudioPlugin, FakeStar))
-        self.assertIs(self.main.Record, FakeRecord)
-        self.assertEqual(self.main.PLUGIN_NAME, "astrbot_plugin_voice_studio")
+class TestPluginShape(SmokeBase):
+    def test_package_imports_with_relative_imports(self):
+        self.assertTrue(hasattr(MAIN, "VoiceStudioPlugin"))
+        self.assertTrue(issubclass(MAIN.VoiceStudioPlugin, FakeStar))
+        self.assertIs(MAIN.Record, FakeRecord)
+        self.assertEqual(MAIN.PLUGIN_VERSION, "0.2.0")
 
     def test_commands_registered(self):
-        registered = {
-            name: alias
-            for name, alias in self.filter_namespace.commands
-        }
-        for expected in ("朗读", "翻唱", "音色", "语音状态"):
+        registered = {name: alias for name, alias in FILTER.commands}
+        for expected in ("朗读", "音色", "音色导入", "音色删除", "语音状态", "翻唱"):
             self.assertIn(expected, registered, f"命令 {expected} 未注册")
-        self.assertIn("语音说", registered["朗读"], "朗读 应带 语音说 别名")
-        # handler 确实挂在类上
-        for attr in ("tts_cmd", "cover_cmd", "voices_cmd", "status_cmd"):
-            self.assertTrue(callable(getattr(self.main.VoiceStudioPlugin, attr, None)), attr)
+        self.assertIn("语音说", registered["朗读"])
+        self.assertEqual(len(FILTER.commands), 6)
+
+    def test_plugin_is_independent_from_dsh(self):
+        forbidden = ("tts-studio", "voiceStudioUrl", "voiceStudioToken", "/api/tts", "voice-studio")
+        offenders = []
+        for path in PLUGIN_DIR.glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for token in forbidden:
+                if token in text:
+                    offenders.append(f"{path.name}: {token}")
+        self.assertEqual(offenders, [], f"插件源码不应再引用 DSH：{offenders}")
 
 
-class TestHelpers(SmokeBase):
+# ---------------------------------------------------------------------------
+# 4. 参数解析
+# ---------------------------------------------------------------------------
+
+
+class TestArgParsing(SmokeBase):
+    def test_read_args_with_options(self):
+        options, text = MAIN.parse_read_args('-v 小鲸鱼 -e happy -i 0.8 -p siliconflow -s 1.2 今天 真好')
+        self.assertEqual(text, "今天 真好")
+        self.assertEqual(options["voice"], "小鲸鱼")
+        self.assertEqual(options["emotion"], "happy")
+        self.assertEqual(options["intensity"], 0.8)
+        self.assertEqual(options["provider"], "siliconflow")
+        self.assertEqual(options["speed"], 1.2)
+
+    def test_read_args_without_options(self):
+        options, text = MAIN.parse_read_args("你好 世界")
+        self.assertEqual(options, {})
+        self.assertEqual(text, "你好 世界")
+
+    def test_read_args_quoted_voice_and_clamp(self):
+        options, text = MAIN.parse_read_args('-v "小 鲸 鱼" -i 9 -s 0.1 你好')
+        self.assertEqual(options["voice"], "小 鲸 鱼")
+        self.assertEqual(options["intensity"], 1.0)
+        self.assertEqual(options["speed"], 0.5)
+        self.assertEqual(text, "你好")
+
+    def test_read_args_invalid_intensity(self):
+        with self.assertRaises(MAIN.VoiceStudioError):
+            MAIN.parse_read_args("-i 很大 你好")
+
+    def test_import_args(self):
+        self.assertEqual(MAIN.parse_import_args('"C:\\a b\\ref.wav" 小鲸鱼'), ("C:\\a b\\ref.wav", "小鲸鱼"))
+        self.assertEqual(MAIN.parse_import_args("C:\\ref.wav"), ("C:\\ref.wav", ""))
+        self.assertEqual(MAIN.parse_import_args(""), ("", ""))
+
+    def test_delete_args(self):
+        self.assertEqual(MAIN.parse_delete_args("小鲸鱼 --yes"), ("小鲸鱼", True))
+        self.assertEqual(MAIN.parse_delete_args("小 鲸 鱼"), ("小 鲸 鱼", False))
+
+    def test_cover_args(self):
+        self.assertEqual(MAIN.split_cover_args('"C:\\a b\\song.mp3" model.pth'), ("C:\\a b\\song.mp3", "model.pth"))
+        self.assertEqual(MAIN.split_cover_args("C:\\song.mp3"), ("C:\\song.mp3", ""))
+
     def test_command_arg(self):
-        arg = self.main._command_arg
-        self.assertEqual(arg("/朗读 你好 世界"), "你好 世界")
-        self.assertEqual(arg("朗读 你好"), "你好")
-        self.assertEqual(arg("语音说 晚安"), "晚安")
-        self.assertEqual(arg("/语音状态"), "")
-        self.assertEqual(arg("音色"), "")
-
-    def test_split_cover_arg(self):
-        split = self.main._split_cover_arg
-        self.assertEqual(split('"C:\\music\\a b.mp3"'), ("C:\\music\\a b.mp3", ""))
-        self.assertEqual(split('"C:\\music\\a b.mp3" model.pth'), ("C:\\music\\a b.mp3", "model.pth"))
-        self.assertEqual(split("C:\\music\\a.mp3"), ("C:\\music\\a.mp3", ""))
-
-    def test_normalize_emotion(self):
-        normalize = self.main.VoiceStudioPlugin._normalize_emotion
-        self.assertIsNone(normalize("auto"))
-        self.assertIsNone(normalize(""))
-        self.assertEqual(normalize("happy"), "happy")
-        self.assertEqual(normalize("happy:0.8"), {"label": "happy", "intensity": 0.8})
-
-    def test_config_helpers_tolerate_junk(self):
-        self.assertEqual(self.main._conf_int({"a": "12"}, "a", 0), 12)
-        self.assertEqual(self.main._conf_int({"a": "oops"}, "a", 7), 7)
-        self.assertTrue(self.main._conf_bool({"a": "true"}, "a", False))
-        self.assertEqual(self.main._conf_list({"a": "1,2"}, "a", []), ["1", "2"])
+        self.assertEqual(MAIN._command_arg("/朗读 你好"), "你好")
+        self.assertEqual(MAIN._command_arg("语音说 晚安"), "晚安")
+        self.assertEqual(MAIN._command_arg("/音色"), "")
 
 
-class TestHttpClient(SmokeBase):
-    def test_client_construction_and_headers(self):
-        plugin = self.make_plugin()
-        FakeAsyncClient.instances.clear()
+# ---------------------------------------------------------------------------
+# 5. 情绪
+# ---------------------------------------------------------------------------
 
-        async def scenario():
-            client = await plugin._get_vs_client()
-            http_client = await client._get_client()  # 底层 httpx.AsyncClient（已 mock）
-            await client.close()
-            return client, http_client
 
-        client, http_client = asyncio.run(scenario())
-        self.assertIsInstance(http_client, FakeAsyncClient)
-        self.assertEqual(http_client.kwargs["follow_redirects"], True)
-        self.assertIsInstance(http_client.kwargs["timeout"], _FakeTimeout)
-        self.assertEqual(client.voice_base, "http://127.0.0.1:9999")
-        self.assertEqual(client.worker_base, "http://127.0.0.1:7870")
-        self.assertEqual(client.voice_headers()["Authorization"], "Bearer voice-token")
-        self.assertEqual(client.worker_headers()["Authorization"], "Bearer worker-token")
-        self.assertTrue(http_client.closed)
+class TestEmotion(SmokeBase):
+    def test_classify_lexicon(self):
+        self.assertEqual(EMOTION.classify_text("今天真开心，太好了")["label"], "happy")
+        self.assertEqual(EMOTION.classify_text("我很难过，想哭")["label"], "sad")
+        self.assertEqual(EMOTION.classify_text("i feel sad and cry")["label"], "sad")
+        neutral = EMOTION.classify_text("今天 8 点开会")
+        self.assertEqual(neutral["label"], "neutral")
+        self.assertEqual(neutral["intensity"], 0.0)
 
-    def test_missing_url_raises_chinese_error(self):
-        plugin = self.make_plugin(voiceStudioUrl="")
-        client = plugin._build_client()
-        with self.assertRaises(self.main.VoiceStudioError) as ctx:
-            _ = client.voice_base
-        self.assertIn("voiceStudioUrl", str(ctx.exception))
+    def test_normalize_explicit(self):
+        self.assertEqual(EMOTION.normalize_explicit("开心")["label"], "happy")
+        self.assertEqual(EMOTION.normalize_explicit("happy")["label"], "happy")
+        self.assertEqual(EMOTION.normalize_explicit("neutral")["label"], "neutral")
+        self.assertEqual(EMOTION.normalize_explicit({"label": "sad", "intensity": 0.4})["intensity"], 0.4)
+        self.assertIsNone(EMOTION.normalize_explicit("不存在的情绪"))
+
+    def test_resolve_priority(self):
+        explicit = EMOTION.resolve_emotion("今天很难过", "happy", mode="auto", default_intensity=0.6)
+        self.assertEqual(explicit["label"], "happy")
+        auto = EMOTION.resolve_emotion("今天很难过", None, mode="auto", default_intensity=0.6)
+        self.assertEqual(auto["label"], "sad")
+        off = EMOTION.resolve_emotion("今天很难过", None, mode="off", default_intensity=0.6)
+        self.assertEqual(off["label"], "neutral")
+        fixed = EMOTION.resolve_emotion("今天很难过", None, mode="happy", default_intensity=0.6)
+        self.assertEqual(fixed["label"], "happy")
+        with self.assertRaises(MAIN.VoiceStudioError):
+            EMOTION.resolve_emotion("x", None, mode="???", default_intensity=0.6)
+
+    def test_provider_mappings(self):
+        happy = {"label": "happy", "intensity": 0.8, "source": "explicit"}
+        vector = EMOTION.to_vector(happy)
+        self.assertEqual(len(vector), 8)
+        self.assertEqual(vector[0], 0.8)
+        self.assertEqual(EMOTION.to_vector({"label": "neutral"}), [0.0] * 8)
+        self.assertEqual(EMOTION.to_minimax(happy), "happy")
+        self.assertEqual(EMOTION.to_minimax({"label": "fear"}), "fearful")
+        self.assertIn("<|endofprompt|>", EMOTION.to_cosy_prefix(happy))
+        self.assertEqual(EMOTION.to_cosy_prefix({"label": "neutral"}), "")
+        self.assertIn("明显", EMOTION.to_mimo_style(happy))
+        self.assertEqual(EMOTION.to_mimo_style({"label": "neutral"}), "")
+        self.assertIn("开心", EMOTION.describe_emotion(happy))
+
+
+# ---------------------------------------------------------------------------
+# 6. 音色库
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceStore(SmokeBase):
+    def make_store(self):
+        return VOICE_MOD.VoiceStore(self.tmp / "voices")
+
+    def test_add_list_resolve(self):
+        store = self.make_store()
+        source = write_wav(self.tmp / "ref.wav", seconds=0.1)
+        entry = store.add(source, "小鲸鱼")
+        self.assertEqual(entry["name"], "小鲸鱼")
+        self.assertTrue(entry["id"].startswith("v"))
+        self.assertTrue((self.tmp / "voices" / entry["file"]).is_file())
+        self.assertTrue(store.meta_path.is_file())
+        voices = store.list_voices()
+        self.assertEqual(len(voices), 1)
+        self.assertTrue(voices[0]["available"])
+        self.assertEqual(store.resolve("小鲸鱼")["id"], entry["id"])
+        self.assertEqual(store.resolve(entry["id"])["name"], "小鲸鱼")
+        self.assertEqual(store.resolve(Path(entry["file"]).stem)["id"], entry["id"])
+        self.assertIsNone(store.resolve("不存在"))
+        self.assertEqual(store.stats()["count"], 1)
+
+    def test_duplicate_name_gets_suffix(self):
+        store = self.make_store()
+        source = write_wav(self.tmp / "ref.wav", seconds=0.1)
+        first = store.add(source, "音色")
+        second = store.add(source, "音色")
+        self.assertEqual(first["name"], "音色")
+        self.assertEqual(second["name"], "音色 (2)")
+
+    def test_reject_bad_extension_and_missing(self):
+        store = self.make_store()
+        bad = self.tmp / "note.txt"
+        bad.write_text("not audio", encoding="utf-8")
+        with self.assertRaises(MAIN.VoiceStudioError):
+            store.add(bad)
+        with self.assertRaises(MAIN.VoiceStudioError):
+            store.add(self.tmp / "missing.wav")
+
+    def test_reject_oversize(self):
+        store = self.make_store()
+        big = self.tmp / "big.wav"
+        with big.open("wb") as handle:
+            handle.seek(VOICE_MOD.MAX_VOICE_BYTES + 10)
+            handle.write(b"x")
+        with self.assertRaises(MAIN.VoiceStudioError) as ctx:
+            store.add(big)
+        self.assertIn("超过上限", str(ctx.exception))
+
+    def test_delete(self):
+        store = self.make_store()
+        entry = store.add(write_wav(self.tmp / "ref.wav", seconds=0.1), "删除我")
+        removed = store.delete("删除我")
+        self.assertEqual(removed["id"], entry["id"])
+        self.assertEqual(store.list_voices(), [])
+        self.assertFalse((self.tmp / "voices" / entry["file"]).exists())
+        with self.assertRaises(MAIN.VoiceStudioError):
+            store.delete("删除我")
+
+
+# ---------------------------------------------------------------------------
+# 7. 提供商请求（mock httpx）
+# ---------------------------------------------------------------------------
+
+
+class TestProviders(SmokeBase):
+    def make_client(self, handler):
+        return FakeAsyncClient(handler=handler)
+
+    def test_indextts_gradio_protocol(self):
+        ref = self.tmp / "ref.mp3"
+        ref.write_bytes(b"reference-audio")
+        dest = self.tmp / "out.wav"
+        calls: list[dict] = []
+
+        def handler(client, method, url, kwargs):
+            if url.endswith("/gradio_api/upload"):
+                calls.append({"kind": "upload", "url": url, "files": list((kwargs.get("files") or {}).keys())})
+                return FakeResponse(200, ["/tmp/gradio/ref.mp3"])
+            if url.endswith("/gradio_api/call/gen_single") and method == "POST":
+                calls.append({"kind": "call", "url": url, "json": kwargs.get("json")})
+                return FakeResponse(200, {"event_id": "ev-1"})
+            if url.endswith("/gradio_api/call/gen_single/ev-1"):
+                calls.append({"kind": "sse", "url": url})
+                return FakeResponse(200, text='event: complete\ndata: [{"path": "/tmp/gradio/out.wav"}]\n\n')
+            if "/gradio_api/file=" in url:
+                calls.append({"kind": "file", "url": url})
+                return FakeResponse(200, content=b"INDEXWAV")
+            raise AssertionError(f"unexpected {method} {url}")
+
+        emotion = {"label": "happy", "intensity": 0.8, "source": "explicit"}
+        result = self.run_async(
+            TTS.synthesize(
+                self.make_client(handler),
+                "indextts",
+                {"baseUrl": "http://127.0.0.1:7860", "lang": "ZH", "emoWeight": 0.8, "durationFactor": 1.0},
+                text="你好世界",
+                ref_path=ref,
+                emotion=emotion,
+                speed=1.0,
+                dest=dest,
+                timeout=60,
+            )
+        )
+        self.assertEqual(dest.read_bytes(), b"INDEXWAV")
+        self.assertEqual(result["provider"], "indextts")
+        self.assertTrue(result["emotionApplied"])
+        kinds = [call["kind"] for call in calls]
+        self.assertEqual(kinds, ["upload", "call", "sse", "file"])
+        self.assertEqual(calls[0]["files"], ["files"])
+        payload = calls[1]["json"]["data"]
+        self.assertEqual(payload[0], TTS.INDEX_EMO_VECTOR)
+        self.assertEqual(payload[2], "你好世界")
+        self.assertEqual(payload[3], "ZH")
+        self.assertAlmostEqual(payload[5], 0.8)
+        self.assertAlmostEqual(payload[6], 0.8)  # happy 维度
+        self.assertEqual(payload[6:14].count(0.0), 7)
+
+    def test_gptsovits_get_tts(self):
+        ref = self.tmp / "ref.wav"
+        ref.write_bytes(b"ref")
+        dest = self.tmp / "out.wav"
+        captured: dict = {}
+
+        def handler(client, method, url, kwargs):
+            captured.update({"method": method, "url": url})
+            return FakeResponse(200, content=b"GPTSOVITS")
+
+        result = self.run_async(
+            TTS.synthesize(
+                self.make_client(handler),
+                "gptsovits",
+                {"baseUrl": "http://127.0.0.1:9880", "textLang": "zh", "promptText": "", "promptLang": "zh", "speed": 1.0},
+                text="你好",
+                ref_path=ref,
+                emotion={"label": "neutral", "intensity": 0, "source": "default"},
+                speed=1.2,
+                dest=dest,
+                timeout=60,
+            )
+        )
+        self.assertEqual(dest.read_bytes(), b"GPTSOVITS")
+        self.assertEqual(captured["method"], "GET")
+        self.assertIn("/tts?", captured["url"])
+        self.assertIn("text=%E4%BD%A0%E5%A5%BD", captured["url"])
+        self.assertIn("speed_factor=1.2", captured["url"])
+        self.assertIn("ref_audio_path=", captured["url"])
+        self.assertIn("ref_free=true", captured["url"])
+        self.assertFalse(result["emotionApplied"])
+
+    def test_siliconflow_speech(self):
+        dest = self.tmp / "out.wav"
+        captured: dict = {}
+
+        def handler(client, method, url, kwargs):
+            captured.update({"url": url, "headers": kwargs.get("headers"), "json": kwargs.get("json")})
+            return FakeResponse(200, content=b"SILICON")
+
+        self.run_async(
+            TTS.synthesize(
+                self.make_client(handler),
+                "siliconflow",
+                {"baseUrl": "https://api.siliconflow.cn/v1", "apiKey": "sk-1", "model": "m", "voice": "v", "format": "wav"},
+                text="你好",
+                ref_path=None,
+                emotion={"label": "happy", "intensity": 0.7, "source": "explicit"},
+                speed=1.0,
+                dest=dest,
+                timeout=60,
+            )
+        )
+        self.assertEqual(dest.read_bytes(), b"SILICON")
+        self.assertEqual(captured["url"], "https://api.siliconflow.cn/v1/audio/speech")
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer sk-1")
+        self.assertEqual(captured["json"]["voice"], "v")
+        self.assertEqual(captured["json"]["model"], "m")
+        self.assertTrue(captured["json"]["input"].startswith("Can you say it with a happy emotion? <|endofprompt|> 你好"))
+
+    def test_minimax_hex_decode(self):
+        dest = self.tmp / "out.mp3"
+        captured: dict = {}
+
+        def handler(client, method, url, kwargs):
+            captured.update({"url": url, "headers": kwargs.get("headers"), "json": kwargs.get("json")})
+            return FakeResponse(
+                200,
+                {"base_resp": {"status_code": 0}, "data": {"audio": b"MINIMAX".hex()}},
+            )
+
+        result = self.run_async(
+            TTS.synthesize(
+                self.make_client(handler),
+                "minimax",
+                {"baseUrl": "https://api.minimax.chat/v1", "apiKey": "mm-1", "groupId": "g1", "model": "m", "voice": "female-shaonv", "format": "mp3"},
+                text="你好",
+                ref_path=None,
+                emotion={"label": "happy", "intensity": 0.7, "source": "explicit"},
+                speed=1.0,
+                dest=dest,
+                timeout=60,
+            )
+        )
+        self.assertEqual(dest.read_bytes(), b"MINIMAX")
+        self.assertIn("/t2a_v2?", captured["url"])
+        self.assertIn("GroupId=g1", captured["url"])
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer mm-1")
+        self.assertEqual(captured["json"]["voice_setting"]["emotion"], "happy")
+        self.assertEqual(captured["json"]["output_format"], "hex")
+        self.assertTrue(result["emotionApplied"])
+
+    def test_minimax_error_status(self):
+        dest = self.tmp / "out.mp3"
+
+        def handler(client, method, url, kwargs):
+            return FakeResponse(200, {"base_resp": {"status_code": 1004, "status_msg": "invalid key"}})
+
+        with self.assertRaises(MAIN.VoiceStudioError):
+            self.run_async(
+                TTS.synthesize(
+                    self.make_client(handler),
+                    "minimax",
+                    {"baseUrl": "https://api.minimax.chat/v1", "apiKey": "x", "groupId": "", "format": "mp3"},
+                    text="你好",
+                    ref_path=None,
+                    emotion=None,
+                    speed=None,
+                    dest=dest,
+                    timeout=60,
+                )
+            )
+
+    def test_mimo_chat_completions(self):
+        dest = self.tmp / "out.wav"
+        captured: dict = {}
+
+        def handler(client, method, url, kwargs):
+            captured.update({"url": url, "headers": kwargs.get("headers"), "json": kwargs.get("json")})
+            audio_b64 = base64.b64encode(b"MIMO").decode()
+            return FakeResponse(200, {"choices": [{"message": {"audio": {"data": audio_b64}}}]})
+
+        result = self.run_async(
+            TTS.synthesize(
+                self.make_client(handler),
+                "mimo",
+                {"baseUrl": "https://mimo.example/v1", "apiKey": "mimo-1", "model": "m", "voice": "v", "format": "wav"},
+                text="你好",
+                ref_path=None,
+                emotion={"label": "happy", "intensity": 0.7, "source": "explicit"},
+                speed=1.0,
+                dest=dest,
+                timeout=60,
+            )
+        )
+        self.assertEqual(dest.read_bytes(), b"MIMO")
+        self.assertEqual(captured["url"], "https://mimo.example/v1/chat/completions")
+        self.assertEqual(captured["headers"]["api-key"], "mimo-1")
+        messages = captured["json"]["messages"]
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertIn("开心", messages[0]["content"])
+        self.assertEqual(messages[-1], {"role": "assistant", "content": "你好"})
+        self.assertTrue(result["emotionApplied"])
+
+    def test_openai_speech_with_instructions(self):
+        dest = self.tmp / "out.mp3"
+        captured: dict = {}
+
+        def handler(client, method, url, kwargs):
+            captured.update({"url": url, "headers": kwargs.get("headers"), "json": kwargs.get("json")})
+            return FakeResponse(200, content=b"OPENAI")
+
+        self.run_async(
+            TTS.synthesize(
+                self.make_client(handler),
+                "openai",
+                {"baseUrl": "https://api.openai.com/v1", "apiKey": "oa-1", "model": "gpt-4o-mini-tts", "voice": "alloy", "format": "mp3"},
+                text="你好",
+                ref_path=None,
+                emotion={"label": "happy", "intensity": 0.7, "source": "explicit"},
+                speed=1.0,
+                dest=dest,
+                timeout=60,
+            )
+        )
+        self.assertEqual(dest.read_bytes(), b"OPENAI")
+        self.assertEqual(captured["url"], "https://api.openai.com/v1/audio/speech")
+        self.assertEqual(captured["json"]["voice"], "alloy")
+        self.assertEqual(captured["json"]["instructions"], "Can you say it with a happy emotion?")
+
+    def test_missing_api_key_fails_with_chinese_error(self):
+        for provider in ("siliconflow", "minimax", "mimo", "openai"):
+            with self.assertRaises(MAIN.VoiceStudioError) as ctx:
+                self.run_async(
+                    TTS.synthesize(
+                        self.make_client(lambda *a: FakeResponse(200, content=b"x")),
+                        provider,
+                        {"baseUrl": "http://x", "apiKey": "", "format": "wav"},
+                        text="你好",
+                        ref_path=None,
+                        emotion=None,
+                        speed=None,
+                        dest=self.tmp / f"{provider}.wav",
+                        timeout=30,
+                    )
+                )
+            self.assertIn("apiKey", str(ctx.exception))
+
+    def test_resolve_format(self):
+        self.assertEqual(TTS.resolve_format("indextts", {"format": "mp3"}), "wav")
+        self.assertEqual(TTS.resolve_format("openai", {}), "mp3")
+        self.assertEqual(TTS.resolve_format("openai", {"format": "wav"}), "wav")
+        with self.assertRaises(MAIN.VoiceStudioError):
+            TTS.resolve_format("openai", {"format": "aiff"})
+
+
+# ---------------------------------------------------------------------------
+# 8. /朗读
+# ---------------------------------------------------------------------------
 
 
 class TestTtsCommand(SmokeBase):
-    def setUp(self):
-        super().setUp()
-        self.audio = write_wav(
-            self.tmp / "tts.wav", channels=1, sample_rate=24000, seconds=0.2, freq=440, amp=0.2
-        )
-        FakeAsyncClient.instances.clear()
-
-    def _run_tts(self, plugin, message_str="/朗读 你好 世界", group_id=""):
-        event = FakeEvent(message_str, group_id)
-
-        async def scenario():
-            return await self.collect(plugin.tts_cmd(event))
-
-        return event, asyncio.run(scenario())
-
-    def test_tts_posts_documented_payload_and_sends_record(self):
-        plugin = self.make_plugin()
-
-        def handler(method, url, kwargs):
-            return FakeHTTPResponse(
-                200,
-                {"ok": True, "file": str(self.audio), "format": "wav", "provider": "indextts"},
+    def _fake_synth(self, calls, out_bytes=b"RIFF....WAVEfake"):
+        async def fake(client, provider, cfg, *, text, ref_path, emotion, speed, dest, timeout):
+            calls.append(
+                {
+                    "provider": provider,
+                    "text": text,
+                    "ref_path": Path(ref_path) if ref_path else None,
+                    "emotion": dict(emotion or {}),
+                    "speed": speed,
+                    "dest": Path(dest),
+                    "timeout": timeout,
+                }
             )
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest).write_bytes(out_bytes)
+            return {"provider": provider, "path": Path(dest), "format": Path(dest).suffix.lstrip("."), "emotionApplied": True}
 
-        with mock.patch.object(FakeAsyncClient, "request_handler", staticmethod(handler)):
-            _event, results = self._run_tts(plugin)
+        return fake
 
-        client = FakeAsyncClient.instances[-1]
-        request = client.requests[-1]
-        self.assertEqual(request["method"], "POST")
-        self.assertEqual(request["url"], "http://127.0.0.1:9999/tts-studio/api/tts")
-        body = request["kwargs"]["json"]
-        self.assertEqual(body["text"], "你好 世界")
-        self.assertIs(body["sendToQQ"], False)
-        self.assertEqual(body["voiceId"], "voice-1")
-        self.assertEqual(body["provider"], "indextts")
-        self.assertEqual(body["emotion"], {"label": "happy", "intensity": 0.8})
-        self.assertEqual(request["kwargs"]["headers"]["Authorization"], "Bearer voice-token")
-        self.assertEqual(len(results), 1)
-        kind, chain = results[0]
-        self.assertEqual(kind, "chain")
-        self.assertIsInstance(chain[0], FakeRecord)
-        self.assertEqual(chain[0].path, str(self.audio))
-
-    def test_tts_remote_url_is_streamed_when_file_not_local(self):
-        plugin = self.make_plugin()
-
-        def handler(method, url, kwargs):
-            return FakeHTTPResponse(
-                200,
-                {"ok": True, "file": "D:/elsewhere/va.wav", "format": "wav",
-                 "url": "/tts-studio/api/audio?path=va.wav"},
-            )
-
-        def stream_handler(method, url, kwargs):
-            return FakeHTTPResponse(200, None, b"RIFF-fake-wav-bytes")
-
-        with mock.patch.object(FakeAsyncClient, "request_handler", staticmethod(handler)), \
-                mock.patch.object(FakeAsyncClient, "stream_handler", staticmethod(stream_handler)):
-            _event, results = self._run_tts(plugin)
-
-        client = FakeAsyncClient.instances[-1]
-        self.assertTrue(client.streams, "跨机部署时应回落到 url 流式下载")
-        self.assertEqual(client.streams[-1]["url"], "http://127.0.0.1:9999/tts-studio/api/audio?path=va.wav")
-        self.assertEqual(len(results), 1)
-        record = results[0][1][0]
+    def test_tts_flow_with_auto_emotion_and_voice(self):
+        plugin = make_plugin()
+        voice = plugin._store().add(write_wav(self.tmp / "ref.wav", seconds=0.1), "小鲸鱼")
+        calls: list[dict] = []
+        with mock.patch.object(TTS, "synthesize", self._fake_synth(calls)):
+            _event, results = self.run_handler(plugin, "tts_cmd", "/朗读 今天真开心，太好了")
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(call["provider"], "indextts")
+        self.assertEqual(call["text"], "今天真开心，太好了")
+        self.assertEqual(call["emotion"]["label"], "happy")
+        expected_ref = plugin._store().resolve(voice["id"])["path"]
+        self.assertEqual(call["ref_path"], Path(expected_ref))
+        self.assertEqual(results[-1][0], "chain")
+        record = results[-1][1][0]
         self.assertTrue(Path(record.path).is_file())
 
-    def test_group_whitelist_blocks(self):
-        plugin = self.make_plugin(allowedGroups=["111"])
-        event, results = self._run_tts(plugin, message_str="/朗读 hi", group_id="222")
-        self.assertTrue(event.stopped)
+    def test_tts_options_override(self):
+        plugin = make_plugin()
+        plugin._store().add(write_wav(self.tmp / "ref.wav", seconds=0.1), "小鲸鱼")
+        calls: list[dict] = []
+        with mock.patch.object(TTS, "synthesize", self._fake_synth(calls)):
+            self.run_handler(
+                plugin,
+                "tts_cmd",
+                "/朗读 -v 小鲸鱼 -e sad -i 0.9 -p indextts -s 1.2 我很难过",
+            )
+        call = calls[0]
+        self.assertEqual(call["emotion"]["label"], "sad")
+        self.assertEqual(call["emotion"]["intensity"], 0.9)
+        self.assertEqual(call["speed"], 1.2)
+
+    def test_online_provider_uses_voice_override(self):
+        plugin = make_plugin()
+        calls: list[dict] = []
+        with mock.patch.object(TTS, "synthesize", self._fake_synth(calls)):
+            self.run_handler(plugin, "tts_cmd", "/朗读 -p siliconflow -v speech:auto 你好")
+        call = calls[0]
+        self.assertEqual(call["provider"], "siliconflow")
+        self.assertIsNone(call["ref_path"])
+        self.assertEqual(call["dest"].suffix, ".wav")
+
+    def test_empty_voice_library_returns_chinese_error(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "tts_cmd", "/朗读 你好")
         self.assertEqual(len(results), 1)
-        self.assertIn("白名单", results[0][1])
-        self.assertEqual(FakeAsyncClient.instances, [], "被白名单拦截时不应该创建 HTTP 客户端")
+        self.assertIn("音色库是空的", results[0][1])
 
-    def test_group_whitelist_allows_listed_group(self):
-        plugin = self.make_plugin(allowedGroups=["111"])
-        self.assertIsNone(plugin._check_allowed(FakeEvent("/朗读 hi", "111")))
-
-    def test_empty_text_returns_usage(self):
-        plugin = self.make_plugin()
-        _event, results = self._run_tts(plugin, message_str="/朗读")
+    def test_usage_without_text(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "tts_cmd", "/朗读")
         self.assertIn("用法", results[0][1])
 
+    def test_group_whitelist(self):
+        plugin = make_plugin(allowedGroups=["111"])
+        event, results = self.run_handler(plugin, "tts_cmd", "/朗读 hi", group_id="222")
+        self.assertTrue(event.stopped)
+        self.assertIn("白名单", results[0][1])
+        self.assertEqual(FakeAsyncClient.instances, [])
 
-class TestVoicesAndStatus(SmokeBase):
-    def test_voices_lists_library(self):
-        plugin = self.make_plugin()
 
-        def handler(method, url, kwargs):
-            self.assertIn("/tts-studio/api/voices", url)
-            return FakeHTTPResponse(
-                200,
-                {"voices": [{"id": "v1", "name": "小鲸鱼", "durationSec": 8.25, "available": True}]},
-            )
+# ---------------------------------------------------------------------------
+# 9. /音色 /音色导入 /音色删除
+# ---------------------------------------------------------------------------
 
-        with mock.patch.object(FakeAsyncClient, "request_handler", staticmethod(handler)):
-            results = asyncio.run(self.collect(plugin.voices_cmd(FakeEvent("/音色"))))
+
+class TestVoiceCommands(SmokeBase):
+    def test_import_list_delete(self):
+        plugin = make_plugin()
+        ref = write_wav(self.tmp / "ref.wav", seconds=0.1)
+        _event, results = self.run_handler(plugin, "voice_import_cmd", f'/音色导入 "{ref}" 小鲸鱼')
+        self.assertIn("已导入", results[0][1])
         self.assertIn("小鲸鱼", results[0][1])
-        self.assertIn("v1", results[0][1])
+
+        _event, results = self.run_handler(plugin, "voices_cmd", "/音色")
+        self.assertIn("小鲸鱼", results[0][1])
         self.assertIn("参考音色 1 个", results[0][1])
 
-    def test_status_reports_both_services(self):
-        plugin = self.make_plugin()
+        _event, results = self.run_handler(plugin, "voice_delete_cmd", "/音色删除 小鲸鱼")
+        self.assertIn("确认删除", results[0][1])
 
-        def handler(method, url, kwargs):
-            if "/tts-studio/api/state" in url:
-                return FakeHTTPResponse(
-                    200,
-                    {"ok": True, "settings": {"tts": {"provider": "indextts"}}, "voices": [{"id": "v1"}]},
-                )
-            if url.endswith("/v1/health"):
-                return FakeHTTPResponse(
-                    200,
-                    {
-                        "ok": True,
-                        "version": "1.0.0",
-                        "rvc": {"available": True, "models": [{"id": "m1"}]},
-                        "gpu": {"name": "RTX 4090"},
-                        "jobs": {"running": 0},
-                    },
-                )
-            raise AssertionError(url)
+        _event, results = self.run_handler(plugin, "voice_delete_cmd", "/音色删除 小鲸鱼 --yes")
+        self.assertIn("已删除", results[0][1])
+        self.assertEqual(plugin._store().list_voices(), [])
 
-        with mock.patch.object(FakeAsyncClient, "request_handler", staticmethod(handler)):
-            results = asyncio.run(self.collect(plugin.status_cmd(FakeEvent("/语音状态"))))
+    def test_import_missing_file(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "voice_import_cmd", "/音色导入 C:\\nope\\x.wav")
+        self.assertIn("找不到要导入的音频文件", results[0][1])
+
+    def test_import_usage(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "voice_import_cmd", "/音色导入")
+        self.assertIn("用法", results[0][1])
+
+    def test_delete_unknown(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "voice_delete_cmd", "/音色删除 不存在 --yes")
+        self.assertIn("找不到", results[0][1])
+
+    def test_empty_library_message(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "voices_cmd", "/音色")
+        self.assertIn("音色库是空的", results[0][1])
+
+
+# ---------------------------------------------------------------------------
+# 10. /语音状态
+# ---------------------------------------------------------------------------
+
+
+class TestStatus(SmokeBase):
+    def test_status_reports_provider_library_and_worker(self):
+        plugin = make_plugin()
+        plugin._store().add(write_wav(self.tmp / "ref.wav", seconds=0.1), "小鲸鱼")
+        health_payload = {
+            "ok": True,
+            "version": "1.0.0",
+            "rvc": {"available": True, "models": [{"id": "m1"}]},
+            "gpu": {"name": "RTX 4090"},
+            "jobs": {"running": 0},
+        }
+
+        async def fake_health(client, base, token):
+            return health_payload
+
+        with mock.patch.object(WORKER, "health", fake_health):
+            _event, results = self.run_handler(plugin, "status_cmd", "/语音状态")
         text = results[0][1]
-        self.assertIn("✅ 语音工坊", text)
+        self.assertIn("✅ TTS 提供商", text)
+        self.assertIn("✅ 音色库", text)
+        self.assertIn("1 个", text)
         self.assertIn("✅ rvc-worker", text)
-        self.assertIn("indextts", text)
         self.assertIn("RTX 4090", text)
+        self.assertIn("不依赖 DSH", text)
+
+    def test_status_without_worker_url(self):
+        plugin = make_plugin(workerUrl="")
+        with mock.patch.object(WORKER, "health", side_effect=AssertionError("不应被调用")):
+            _event, results = self.run_handler(plugin, "status_cmd", "/语音状态")
+        self.assertIn("❌ rvc-worker", results[0][1])
+
+    def test_status_online_provider_missing_key(self):
+        plugin = make_plugin(ttsProvider="siliconflow", siliconflow={**make_plugin().config["siliconflow"], "apiKey": ""})
+        with mock.patch.object(WORKER, "health", side_effect=MAIN.VoiceStudioError("down")):
+            _event, results = self.run_handler(plugin, "status_cmd", "/语音状态")
+        text = results[0][1]
+        self.assertIn("⚠️ TTS 提供商", text)
+        self.assertIn("apiKey", text)
 
 
-class TestMixAndCover(SmokeBase):
-    def test_mix_cover_rms_and_peak(self):
-        main = self.main
+# ---------------------------------------------------------------------------
+# 11. /翻唱 + 混音
+# ---------------------------------------------------------------------------
+
+
+class TestCover(SmokeBase):
+    def test_mix_cover(self):
         inst = write_wav(self.tmp / "inst.wav", channels=2, sample_rate=44100, seconds=0.5, freq=220, amp=0.3)
         vocal = write_wav(self.tmp / "vocal.wav", channels=1, sample_rate=22050, seconds=0.5, freq=440, amp=0.15)
         source = write_wav(self.tmp / "source.wav", channels=1, sample_rate=22050, seconds=0.5, freq=440, amp=0.3)
         out = self.tmp / "mixed.wav"
-        main._mix_cover(inst, vocal, source, out)
-
+        AUDIO.mix_cover(inst, vocal, source, out)
         self.assertTrue(out.is_file())
-        duration = main._wav_duration_sec(out)
-        self.assertAlmostEqual(duration, 0.5, places=2)
-        decoded = main._decode_wav(out)
+        self.assertAlmostEqual(AUDIO.wav_duration_sec(out), 0.5, places=2)
+        decoded = AUDIO.decode_wav(out)
         self.assertEqual(decoded["channels"], 2)
         self.assertEqual(decoded["sample_rate"], 44100)
         peak = float(abs(decoded["samples"]).max())
         self.assertAlmostEqual(peak, 0.891, places=2)
 
-    def test_cover_handler_end_to_end_with_fake_worker(self):
-        main = self.main
-        song = write_wav(self.tmp / "song.wav", channels=2, sample_rate=44100, seconds=0.5, freq=200, amp=0.2)
-        vocal = write_wav(self.tmp / "sep_vocal.wav", channels=1, sample_rate=44100, seconds=0.5, freq=300, amp=0.15)
-        inst = write_wav(self.tmp / "sep_inst.wav", channels=2, sample_rate=44100, seconds=0.5, freq=200, amp=0.2)
-        converted = write_wav(self.tmp / "sep_conv.wav", channels=1, sample_rate=44100, seconds=0.5, freq=310, amp=0.2)
+    def _run_cover(self, plugin, song: Path):
+        vocal = write_wav(self.tmp / "sep_vocal.wav", channels=1, sample_rate=44100, seconds=0.4, freq=300, amp=0.15)
+        inst = write_wav(self.tmp / "sep_inst.wav", channels=2, sample_rate=44100, seconds=0.4, freq=200, amp=0.2)
+        converted = write_wav(self.tmp / "sep_conv.wav", channels=1, sample_rate=44100, seconds=0.4, freq=310, amp=0.2)
+        jobs: list[tuple] = []
 
-        class FakeWorkerClient(main.VoiceStudioClient):
-            def __init__(self):
-                super().__init__(voice_base="http://127.0.0.1:1", worker_base="http://127.0.0.1:2")
-                self.jobs = []
-                self.uploaded = []
+        async def fake_upload(client, base, token, path):
+            return "file-song"
 
-            async def upload_file(self, path):
-                self.uploaded.append(Path(path))
-                return "file-song"
+        async def fake_create(client, base, token, job_type, file_id, params=None):
+            jobs.append((job_type, file_id, dict(params or {})))
+            return f"job-{job_type}"
 
-            async def create_job(self, job_type, file_id, params=None):
-                self.jobs.append((job_type, file_id, dict(params or {})))
-                return f"job-{job_type}"
+        async def fake_wait(client, base, token, job_id, *, timeout_s=0, poll_interval=0, logger=None):
+            if job_id == "job-separate":
+                return {"status": "succeeded", "outputs": [
+                    {"name": "vocal.wav", "fileId": "file-vocal"},
+                    {"name": "instrumental.wav", "fileId": "file-inst"},
+                ]}
+            return {"status": "succeeded", "outputs": [{"name": "converted.wav", "fileId": "file-conv"}]}
 
-            async def wait_job(self, job_id):
-                if job_id == "job-separate":
-                    return {
-                        "status": "succeeded",
-                        "outputs": [
-                            {"name": "vocal.wav", "fileId": "file-vocal"},
-                            {"name": "instrumental.wav", "fileId": "file-inst"},
-                        ],
-                    }
-                return {
-                    "status": "succeeded",
-                    "outputs": [{"name": "converted.wav", "fileId": "file-conv"}],
-                }
+        async def fake_download(client, base, token, job_id, name, dest):
+            source = converted if "convert" in job_id else (vocal if "vocal" in name else inst)
+            dest = Path(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(source.read_bytes())
+            return dest
 
-            async def download_job_output(self, job_id, name, dest):
-                source = converted if "convert" in job_id else (vocal if "vocal" in name else inst)
-                dest = Path(dest)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(source.read_bytes())
-                return dest
+        with mock.patch.object(WORKER, "upload_file", fake_upload), \
+                mock.patch.object(WORKER, "create_job", fake_create), \
+                mock.patch.object(WORKER, "wait_job", fake_wait), \
+                mock.patch.object(WORKER, "download_job_output", fake_download):
+            _event, results = self.run_handler(plugin, "cover_cmd", f'/翻唱 "{song}"')
+        return jobs, results
 
-        plugin = self.make_plugin()
-        fake_client = FakeWorkerClient()
-        plugin._client = fake_client
-        event = FakeEvent(f'/翻唱 "{song}"')
-
-        results = asyncio.run(self.collect(plugin.cover_cmd(event)))
-
-        self.assertEqual([job[0] for job in fake_client.jobs], ["separate", "convert"])
-        convert_params = fake_client.jobs[1][2]
+    def test_cover_end_to_end(self):
+        plugin = make_plugin()
+        song = write_wav(self.tmp / "song.wav", channels=2, sample_rate=44100, seconds=0.4, freq=200, amp=0.2)
+        jobs, results = self._run_cover(plugin, song)
+        self.assertEqual([job[0] for job in jobs], ["separate", "convert"])
+        convert_params = jobs[1][2]
         self.assertEqual(convert_params["model"], "test.pth")
         self.assertEqual(convert_params["f0_method"], "rmvpe")
         self.assertEqual(convert_params["f0_up_key"], 3)
-
+        self.assertEqual(convert_params["index_rate"], 0.75)
         final_kind, final_chain = results[-1]
         self.assertEqual(final_kind, "chain")
         record = final_chain[0]
         self.assertTrue(Path(record.path).is_file())
-        self.assertTrue(Path(record.path).name.endswith(".wav"))
-        mixed = main._decode_wav(Path(record.path))
+        mixed = AUDIO.decode_wav(Path(record.path))
         self.assertEqual(mixed["channels"], 2)
-        # 混音结果应是可播放的非静音音频
         self.assertGreater(float(abs(mixed["samples"]).max()), 0.5)
 
-    def test_cover_rejects_missing_file(self):
-        plugin = self.make_plugin()
-        missing = self.tmp / "does_not_exist.mp3"
-        results = asyncio.run(self.collect(plugin.cover_cmd(FakeEvent(f"/翻唱 {missing}"))))
+    def test_cover_missing_file(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "cover_cmd", f"/翻唱 {self.tmp / 'nope.mp3'}")
         self.assertIn("找不到歌曲文件", results[0][1])
+
+    def test_cover_usage(self):
+        plugin = make_plugin()
+        _event, results = self.run_handler(plugin, "cover_cmd", "/翻唱")
+        self.assertIn("用法", results[0][1])
+
+
+# ---------------------------------------------------------------------------
+# 12. httpx 客户端构造
+# ---------------------------------------------------------------------------
+
+
+class TestHttpClient(SmokeBase):
+    def test_client_construction(self):
+        plugin = make_plugin()
+
+        async def scenario():
+            client = await plugin._http()
+            await plugin.terminate()
+            return client
+
+        client = self.run_async(scenario())
+        self.assertIsInstance(client, FakeAsyncClient)
+        self.assertTrue(client.kwargs["follow_redirects"])
+        self.assertIsInstance(client.kwargs["timeout"], _FakeTimeout)
+        self.assertTrue(client.closed)
 
 
 def main():
