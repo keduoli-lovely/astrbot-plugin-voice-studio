@@ -1408,7 +1408,7 @@ class TestWebAPI(SmokeBase):
 
         return fake
 
-    def test_preview_returns_base64_audio(self):
+    def test_preview_returns_chunked_audio(self):
         plugin = make_plugin()
         plugin._store().add(write_wav(self.tmp / "ref.wav", seconds=0.1), "小鲸鱼")
         self.use_request(
@@ -1418,9 +1418,24 @@ class TestWebAPI(SmokeBase):
         with mock.patch.object(TTS, "synthesize", self._install_fake_synth()):
             response = self.call(plugin._web_api.handle_test)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["mime"], "audio/wav")
-        content = base64.b64decode(response.data["data"])
-        self.assertTrue(content.startswith(b"RIFF"))
+        payload = response.data
+        self.assertTrue(payload.get("previewId"))
+        self.assertGreaterEqual(int(payload.get("chunks") or 0), 1)
+        collected = b""
+        for index in range(int(payload["chunks"])):
+            self.use_request(
+                method="GET",
+                query={"id": payload["previewId"], "index": str(index)},
+            )
+            chunk = self.call(plugin._web_api.handle_test_chunk)
+            self.assertEqual(chunk.status_code, 200)
+            collected += base64.b64decode(chunk.data["data"])
+        self.assertEqual(len(collected), int(payload["bytes"]))
+        self.assertTrue(
+            collected.startswith(b"RIFF")
+            or collected.startswith(b"ID3")
+            or collected[:2] == b"\xff\xfb"
+        )
 
     def test_preview_validates_input(self):
         plugin = make_plugin()

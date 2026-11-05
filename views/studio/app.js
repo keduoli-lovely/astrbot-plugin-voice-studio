@@ -595,10 +595,23 @@ async function workerProcess(process, action) {
   }
 }
 
+function normalizeBridgeResult(value) {
+  if (typeof value !== "string") return value;
+  const raw = value;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    if (raw.length > 64 && /^[A-Za-z0-9+/=\s]+$/.test(raw)) {
+      return { data: raw.replace(/\s+/g, ""), mime: "audio/mpeg" };
+    }
+    throw new Error("后端返回了非 JSON 字符串（前 120 字符）：" + raw.slice(0, 120));
+  }
+}
+
 async function preview() {
   const text = $("preview-text").value.trim();
-  if (text.length > 10) {
-    setStatus("preview-status", "语音合成试听：文本请控制在 10 字以内", "err");
+  if (text.length > 20) {
+    setStatus("preview-status", "语音合成试听：文本请控制在 20 字以内", "err");
     return;
   }
   if (!text) {
@@ -615,32 +628,29 @@ async function preview() {
       voice: $("preview-voice").value || null,
       emotion: $("preview-emotion").value || "auto",
     };
-    let result = await bridge.apiPost("test", payload);
-    if (typeof result === "string") {
-      const raw = result;
-      try {
-        result = JSON.parse(raw);
-      } catch (error) {
-        if (raw.length > 64 && /^[A-Za-z0-9+/=\s]+$/.test(raw)) {
-          result = { data: raw.replace(/\s+/g, ""), mime: "audio/mpeg" };
-        } else {
-          throw new Error("后端返回了非 JSON 字符串（前 120 字符）：" + raw.slice(0, 120));
+    let result = normalizeBridgeResult(await bridge.apiPost("test", payload));
+    let audioData = "";
+    if (result && typeof result.data === "string" && result.data) {
+      audioData = result.data;
+    } else if (result && result.previewId) {
+      const total = Math.max(1, Number(result.chunks) || 1);
+      const parts = [];
+      for (let index = 0; index < total; index += 1) {
+        const chunk = normalizeBridgeResult(
+          await bridge.apiGet("test/chunk", { id: result.previewId, index: index })
+        );
+        if (!chunk || !chunk.data) {
+          throw new Error("试听分片读取失败（第 " + (index + 1) + "/" + total + " 片）");
         }
+        parts.push(chunk.data);
       }
+      audioData = parts.join("");
     }
-    if (result && typeof result === "object" && typeof result.data === "string" && result.data.trim().startsWith("{")) {
-      try {
-        const nested = JSON.parse(result.data);
-        if (nested && nested.data) result = nested;
-      } catch (error) {
-        /* keep original */
-      }
-    }
-    if (!result || !result.data) {
+    if (!audioData) {
       const shape = result === null || result === undefined ? String(result) : typeof result;
-      throw new Error("后端没有返回音频数据（结果类型：" + shape + "；请缩短文本后重试）");
+      throw new Error("后端没有返回音频数据（结果类型：" + shape + "）");
     }
-    $("preview-audio").src = "data:" + (result.mime || "audio/wav") + ";base64," + result.data;
+    $("preview-audio").src = "data:" + (result.mime || "audio/mpeg") + ";base64," + audioData;
     setStatus(
       "preview-status",
       "完成：提供商 " + (result.provider || "?") + (result.emotionApplied ? "，已应用情绪" : ""),

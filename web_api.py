@@ -63,8 +63,9 @@ except ImportError:  # 旧版 AstrBot / 离线测试：占位，不注册路由
     request = None  # type: ignore[assignment]
 
 
-PREVIEW_MAX_CHARS = 10
-PREVIEW_MAX_BYTES = 6_000
+PREVIEW_MAX_CHARS = 20
+PREVIEW_MAX_BYTES = 40_000
+PREVIEW_CHUNK_BYTES = 4_096
 PREVIEW_TRANSCODE_ABOVE = 4_000
 PROCESS_ALLOWED = {"rvc-webui": "RVC 进程", "msst": "MSST 进程"}
 ACTION_ALLOWED = {"start", "stop"}
@@ -139,6 +140,7 @@ class StudioWebAPI:
 ("tts/health", self.handle_tts_health, ["GET"], "语音合成连接测试"),
             ("voices/audio", self.handle_voice_audio, ["GET"], "播放参考音色"),
             ("test", self.handle_test, ["POST"], "试听合成"),
+("test/chunk", self.handle_test_chunk, ["GET"], "试听音频分片"),
             ("worker/health", self.handle_worker_health, ["GET"], "rvc-worker 健康检查"),
 ("worker/models", self.handle_worker_models, ["GET"], "从 rvc-worker 获取模型/索引列表"),
             ("worker/process", self.handle_worker_process, ["POST"], "启动/停止 worker 子进程"),
@@ -359,6 +361,38 @@ class StudioWebAPI:
             return error_response(str(exc), status_code=400)
 
     # -- 试听 ---------------------------------------------------------------
+    async def handle_test_chunk(self):
+        """按 4KB 分片返回试听音频（base64），避免 bridge 大响应被截断。"""
+        try:
+            preview_id = str(request.query.get("id") or "").strip()
+            index_raw = request.query.get("index") or "0"
+            if not preview_id or not preview_id.isalnum():
+                return error_response("缺少试听 id", status_code=400)
+            try:
+                index = int(index_raw)
+            except (TypeError, ValueError):
+                return error_response("试听分片序号无效", status_code=400)
+            tmp_dir = self.plugin._data_dir / "tmp"
+            matches = list(tmp_dir.glob(f"preview_{preview_id}.*"))
+            if not matches:
+                return error_response("试听音频已过期，请重新试听", status_code=404)
+            content = matches[0].read_bytes()
+            offset = index * PREVIEW_CHUNK_BYTES
+            if offset >= len(content) or index < 0:
+                return error_response("试听分片序号越界", status_code=400)
+            chunk = content[offset:offset + PREVIEW_CHUNK_BYTES]
+            return json_response(
+                {
+                    "ok": True,
+                    "index": index,
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                    "done": offset + PREVIEW_CHUNK_BYTES >= len(content),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[%s] 试听分片读取失败", PLUGIN_NAME)
+            return error_response(f"试听分片失败：{exc}", status_code=500)
+
     async def handle_test(self):
         try:
             payload = await request.json(default={})
@@ -396,15 +430,17 @@ class StudioWebAPI:
             path = Path(result["path"])
             content = path.read_bytes()
             mime = _mime_for(path)
-            # Large WAV previews get transcoded to MP3 so the dashboard response
-            # stays small enough to reach the sandboxed iframe intact.
-            if len(content) > PREVIEW_TRANSCODE_ABOVE and not str(path.suffix).lower().endswith(".mp3") and audio.which("ffmpeg"):
-                tmp_dir = self.plugin._data_dir / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir = self.plugin._data_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            # Always transcode previews to a compact, good-sounding mono MP3.
+            # The dashboard iframe receives the audio in small chunks (test/chunk),
+            # so the per-response size stays far below the bridge truncation point.
+            if audio.which("ffmpeg"):
                 mp3_path = tmp_dir / f"preview_{uuid.uuid4().hex[:8]}.mp3"
                 ok = await audio.run_ffmpeg(
                     ["-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
-                     "-t", "3", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "8k", str(mp3_path)]
+                     "-t", "30", "-ac", "1", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "32k",
+                     str(mp3_path)]
                 )
                 if ok and mp3_path.is_file() and mp3_path.stat().st_size > 0:
                     path = mp3_path
@@ -416,13 +452,26 @@ class StudioWebAPI:
                     % (len(content) / 1048576.0),
                     status_code=400,
                 )
+            # Drop stale preview files, then expose the audio as a chunked download.
+            cutoff = time.time() - 1800
+            for stale in tmp_dir.glob("preview_*.mp3"):
+                try:
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink()
+                except OSError:
+                    pass
+            preview_id = uuid.uuid4().hex[:16]
+            ext = ".mp3" if mime == "audio/mpeg" else path.suffix or ".bin"
+            (tmp_dir / f"preview_{preview_id}{ext}").write_bytes(content)
             return json_response(
                 {
                     "ok": True,
+                    "previewId": preview_id,
                     "mime": mime,
-                    "format": result.get("format") or path.suffix.lstrip("."),
-                    "data": base64.b64encode(content).decode("ascii"),
                     "bytes": len(content),
+                    "chunks": (len(content) + PREVIEW_CHUNK_BYTES - 1) // PREVIEW_CHUNK_BYTES,
+                    "chunkBytes": PREVIEW_CHUNK_BYTES,
+                    "format": result.get("format") or path.suffix.lstrip("."),
                     "provider": result.get("provider"),
                     "emotionApplied": bool(result.get("emotionApplied")),
                     "emotion": result.get("emotion"),
