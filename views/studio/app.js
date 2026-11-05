@@ -82,8 +82,8 @@ const PROVIDER_FIELDS = {
 const WORKER_FIELDS = [
   { key: "url", label: "Worker 地址", type: "text", placeholder: "http://127.0.0.1:7870" },
   { key: "token", label: "Token", type: "password" },
-  { key: "model", label: "RVC 模型（.pth）", type: "text", placeholder: "留空用 worker 上第一个模型" },
-  { key: "index", label: "Index 文件（可选）", type: "text" },
+  { key: "model", label: "RVC 模型（来自 worker API）", type: "select", options: [] },
+  { key: "index", label: "Index（来自 worker API，可选）", type: "select", options: [] },
   {
     key: "f0Method",
     label: "F0 方法",
@@ -110,6 +110,7 @@ const state = {
   settings: {
     ttsProvider: "indextts",
     providers: {},
+  workerModels: { models: [], indexes: [] },
     worker: {},
     defaultVoice: "",
     defaultEmotion: "auto",
@@ -259,14 +260,58 @@ function fillCommonFields() {
   $("default-voice").value = state.settings.defaultVoice || "";
 }
 
+function workerFieldOptions(spec) {
+  if (spec.key === "model") {
+    return (state.workerModels.models || []).map(function (item) {
+      return [String(item.id), item.name ? item.name + "（" + item.id + "）" : String(item.id)];
+    });
+  }
+  if (spec.key === "index") {
+    return [["", "（自动匹配）"]].concat(
+      (state.workerModels.indexes || []).map(function (item) {
+        return [String(item.id), item.name || String(item.id)];
+      })
+    );
+  }
+  return spec.options || [];
+}
+
 function renderWorkerFields() {
   const container = $("worker-fields");
   container.replaceChildren();
   const values = state.settings.worker || {};
-  WORKER_FIELDS.forEach(function (spec) {
+  WORKER_FIELDS.forEach(function (raw) {
+    const spec = Object.assign({}, raw);
+    if (spec.key === "model" || spec.key === "index") {
+      spec.options = workerFieldOptions(spec);
+    }
     const control = buildField("worker", spec, values[spec.key], "worker");
     container.appendChild(control);
   });
+}
+
+async function refreshWorkerModels() {
+  const button = $("worker-refresh-models");
+  button.disabled = true;
+  setStatus("worker-models-status", "获取中…");
+  try {
+    const result = await bridge.apiGet("worker/models");
+    state.workerModels = {
+      models: (result && result.models) || [],
+      indexes: (result && result.indexes) || [],
+    };
+    renderWorkerFields();
+    setStatus(
+      "worker-models-status",
+      "已从 worker 获取 " + state.workerModels.models.length + " 个模型、" +
+        state.workerModels.indexes.length + " 个索引",
+      "ok"
+    );
+  } catch (error) {
+    setStatus("worker-models-status", "翻唱 worker 获取模型失败：" + errorText(error), "err");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function readWorkerFields() {
@@ -604,6 +649,7 @@ function bindEvents() {
   });
   $("preview-btn").addEventListener("click", preview);
   $("tts-test").addEventListener("click", testTts);
+  $("worker-refresh-models").addEventListener("click", refreshWorkerModels);
 }
 
 function applyContext(context) {

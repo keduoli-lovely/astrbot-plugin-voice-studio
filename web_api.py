@@ -63,9 +63,9 @@ except ImportError:  # 旧版 AstrBot / 离线测试：占位，不注册路由
     request = None  # type: ignore[assignment]
 
 
-PREVIEW_MAX_CHARS = 40
-PREVIEW_MAX_BYTES = 300_000
-PREVIEW_TRANSCODE_ABOVE = 60_000
+PREVIEW_MAX_CHARS = 20
+PREVIEW_MAX_BYTES = 40_000
+PREVIEW_TRANSCODE_ABOVE = 15_000
 PROCESS_ALLOWED = {"rvc-webui": "RVC 进程", "msst": "MSST 进程"}
 ACTION_ALLOWED = {"start", "stop"}
 
@@ -140,6 +140,7 @@ class StudioWebAPI:
             ("voices/audio", self.handle_voice_audio, ["GET"], "播放参考音色"),
             ("test", self.handle_test, ["POST"], "试听合成"),
             ("worker/health", self.handle_worker_health, ["GET"], "rvc-worker 健康检查"),
+("worker/models", self.handle_worker_models, ["GET"], "从 rvc-worker 获取模型/索引列表"),
             ("worker/process", self.handle_worker_process, ["POST"], "启动/停止 worker 子进程"),
         ]
         for path, handler, methods, desc in routes:
@@ -403,7 +404,7 @@ class StudioWebAPI:
                 mp3_path = tmp_dir / f"preview_{uuid.uuid4().hex[:8]}.mp3"
                 ok = await audio.run_ffmpeg(
                     ["-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
-                     "-c:a", "libmp3lame", "-b:a", "96k", str(mp3_path)]
+                     "-ac", "1", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "32k", str(mp3_path)]
                 )
                 if ok and mp3_path.is_file() and mp3_path.stat().st_size > 0:
                     path = mp3_path
@@ -434,6 +435,33 @@ class StudioWebAPI:
             return error_response(f"试听失败：{exc.__class__.__name__}: {exc}", status_code=500)
 
     # -- worker -------------------------------------------------------------
+    async def handle_worker_models(self):
+        """从 rvc-worker 的 /v1/models 取模型与索引，前端不写死任何模型名。"""
+        try:
+            import httpx
+        except Exception:  # noqa: BLE001
+            return error_response("缺少 httpx 依赖", status_code=500)
+        try:
+            settings = await asyncio.to_thread(self.plugin.merged_settings)
+            worker_cfg = settings.get("worker") or {}
+            base_url = worker.normalize_base(str(worker_cfg.get("url") or ""))
+            if not base_url:
+                return error_response("请先填写 Worker 地址", status_code=400)
+            token = str(worker_cfg.get("token") or "").strip()
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                data = await worker.models(client, base_url, token)
+            return json_response(
+                {
+                    "ok": True,
+                    "models": data.get("models") or [],
+                    "indexes": data.get("indexes") or [],
+                    "root": data.get("root") or data.get("rvcRoot") or "",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[%s] 获取 worker 模型列表失败", PLUGIN_NAME)
+            return error_response(f"获取模型列表失败：{exc}", status_code=502)
+
     async def handle_worker_health(self):
         try:
             health = await self.plugin.worker_health()
