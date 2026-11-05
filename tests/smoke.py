@@ -1829,6 +1829,19 @@ class TestRandomVoice(SmokeBase):
         self.assertTrue(any("收到" in text for text in texts), texts)
         self.assertTrue(any("chain" in str(item[0]) for item in event.sent if isinstance(item, tuple)))
 
+    def test_song_listener_reports_busy(self):
+        plugin = make_plugin()
+        plugin._cover_busy = {"user": "小明", "song": "a.mp3"}
+        event = FakeEvent("唱首海屿你")
+        self.run_async(plugin.song_listener(event))
+        self.assertTrue(event.stopped)
+        texts = [str(item[1]) for item in event.sent if isinstance(item, tuple)]
+        self.assertTrue(any("小明" in text and "请稍后" in text for text in texts), texts)
+
+    def test_estimate_cover_minutes(self):
+        self.assertGreaterEqual(MAIN.estimate_cover_minutes(296), 2)
+        self.assertGreater(MAIN.estimate_cover_minutes(296), MAIN.estimate_cover_minutes(60))
+
 def main():
     unittest.main(verbosity=2)
 

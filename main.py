@@ -39,6 +39,11 @@ from typing import Any
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Record
+try:  # 可选：用于“引用用户发送的音频”提示
+    from astrbot.api.message_components import Plain as _PlainComponent, Reply as _ReplyComponent
+except Exception:  # noqa: BLE001
+    _PlainComponent = None
+    _ReplyComponent = None
 from astrbot.api.star import Context, Star
 
 from . import audio, emotion as emotion_mod, tts_providers, worker
@@ -154,6 +159,26 @@ def _message_audio_source(event: AstrMessageEvent) -> Path | str | None:
         if url and str(url).lower().startswith(("http://", "https://")):
             return str(url)
     return None
+
+
+def estimate_cover_minutes(duration: float | None) -> int:
+    """按歌曲时长粗估翻唱耗时（约 2 倍时长，最少 2 分钟）。"""
+
+    seconds = float(duration or 180.0)
+    return max(2, int(round(seconds / 60.0 * 2)))
+
+
+def _quoted_plain_result(event: AstrMessageEvent, text: str):
+    """尽量以“引用用户消息”的形式回复，组件不可用时退回普通文本。"""
+
+    if _ReplyComponent is not None and _PlainComponent is not None:
+        try:
+            message_id = str(getattr(getattr(event, "message_obj", None), "message_id", "") or "")
+            if message_id:
+                return event.chain_result([_ReplyComponent(id=message_id), _PlainComponent(text)])
+        except Exception:  # noqa: BLE001
+            pass
+    return event.plain_result(text)
 
 
 def _session_key(event: AstrMessageEvent) -> str:
@@ -378,6 +403,7 @@ class VoiceStudioPlugin(Star):
         self._voice_store: VoiceStore | None = None
         self._settings_store = SettingsStore(self._data_dir / "settings.json")
         self._pending_song: dict[str, float] = {}
+        self._cover_busy: dict | None = None
         self._web_api: StudioWebAPI | None = None
         try:
             self._web_api = StudioWebAPI(self)
@@ -1138,7 +1164,22 @@ class VoiceStudioPlugin(Star):
             )
             return
 
+        busy = self._cover_busy
+        if busy:
+            yield event.plain_result(
+                f"正在为 {busy.get('user') or '用户'} 翻唱《{busy.get('song')}》，请稍后再来～"
+            )
+            return
+        duration = await audio.probe_duration(song_path)
+        self._cover_busy = {
+            "user": getattr(event, "get_sender_name", lambda: "")() or "用户",
+            "song": song_path.name,
+        }
         try:
+            yield event.plain_result(
+                f"🎵 开始翻唱：{song_path.name}（{format_seconds(duration)}），"
+                f"预计约 {estimate_cover_minutes(duration)} 分钟"
+            )
             final = await self._run_cover_job(event, song_path, model)
             yield event.chain_result([_record_for(final)])
         except VoiceStudioError as exc:
@@ -1146,12 +1187,13 @@ class VoiceStudioPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.exception("[%s] /翻唱 未预期错误", PLUGIN_NAME)
             yield event.plain_result(f"❌ 翻唱失败：{exc.__class__.__name__}: {exc}")
+        finally:
+            self._cover_busy = None
 
     async def _run_cover_job(self, event: AstrMessageEvent, song_path: Path, model: str) -> Path:
         """执行 RVC 翻唱全流程，进度通过 event.send 发出，返回最终音频路径。"""
 
         worker_settings = self.effective_worker()
-        progress = conf_bool(self.config, "sendProgress", True)
         max_duration = max(10, conf_int(self.config, "maxDurationSec", 600))
         job_timeout = max(60, conf_int(self.config, "jobTimeoutSec", 1800))
         f0_method = str(worker_settings.get("f0Method") or "rmvpe")
@@ -1173,18 +1215,11 @@ class VoiceStudioPlugin(Star):
                 f"歌曲时长 {format_seconds(duration)} 超过上限 {max_duration} 秒"
                 "（可在配置 maxDurationSec 调整）。"
             )
-        if progress:
-            await event.send(event.plain_result(
-                f"🎵 开始翻唱：{song_path.name}（{format_seconds(duration)}）\n"
-                "流程：上传 → 人声分离 → 换声 → 混音，可能需要几分钟…"
-            ))
 
         if not model:
             model = await self._first_model(client, base_url, token)
 
         file_id = await worker.upload_file(client, base_url, token, song_path)
-        if progress:
-            await event.send(event.plain_result("📤 上传完成，正在做人声分离…"))
         separate_job = await worker.create_job(
             client, base_url, token, "separate", file_id, {"mode": "vocals", "format": "wav"}
         )
@@ -1219,10 +1254,6 @@ class VoiceStudioPlugin(Star):
                 f"歌曲实际时长 {format_seconds(actual_duration)} 超过上限 {max_duration} 秒。"
             )
 
-        if progress:
-            await event.send(event.plain_result(
-                f"🎤 分离完成，正在换声（模型：{model}，变调：{key_shift:+d}）…"
-            ))
 
         convert_params: dict[str, Any] = {
             "model": model,
@@ -1257,8 +1288,6 @@ class VoiceStudioPlugin(Star):
             client, base_url, token, convert_job, str(converted_out.get("name") or "converted.wav"), converted_wav
         )
 
-        if progress:
-            await event.send(event.plain_result("🎚️ 换声完成，正在混音…"))
         mixed = work_dir / "cover.wav"
         await asyncio.to_thread(audio.mix_cover, inst_wav, converted_wav, vocal_wav, mixed)
         return await self._finalize_cover(mixed)
@@ -1285,10 +1314,16 @@ class VoiceStudioPlugin(Star):
 
             if attachment is None:
                 if singing:
+                    busy = self._cover_busy
+                    if busy:
+                        await event.send(event.plain_result(
+                            f"正在为 {busy.get('user') or '用户'} 翻唱《{busy.get('song')}》，请稍后再来～"
+                        ))
+                        if hasattr(event, "stop_event"):
+                            event.stop_event()
+                        return
                     self._pending_song[key] = now
-                    await event.send(event.plain_result(
-                        "想听我翻唱哪首歌？把歌曲音频文件发给我，我收到就直接开唱（不用发 /唱歌）。"
-                    ))
+                    await event.send(event.plain_result("想听我翻唱哪首歌？把歌曲音频文件发给我"))
                     if hasattr(event, "stop_event"):
                         event.stop_event()
                 return
@@ -1296,6 +1331,16 @@ class VoiceStudioPlugin(Star):
             if not singing and not pending:
                 return  # 没有在等歌曲时，普通音频不处理
 
+            busy = self._cover_busy
+            if busy:
+                await event.send(event.plain_result(
+                    f"正在为 {busy.get('user') or '用户'} 翻唱《{busy.get('song')}》，请稍后再来～"
+                ))
+                if hasattr(event, "stop_event"):
+                    event.stop_event()
+                return
+
+            await event.send(_quoted_plain_result(event, "收到了，正在接收中ing..."))
             song_path = await self._resolve_audio_attachment(attachment)
             if song_path is None:
                 return
@@ -1308,12 +1353,15 @@ class VoiceStudioPlugin(Star):
                 return
 
             self._pending_song.pop(key, None)
-            await event.send(event.plain_result(
-                f"✅ 收到《{song_path.name}》，正在接收并准备开始唱…"
-            ))
             if hasattr(event, "stop_event"):
                 event.stop_event()
+            duration = await audio.probe_duration(song_path)
+            self._cover_busy = {"user": getattr(event, "get_sender_name", lambda: "")() or "用户", "song": song_path.name}
             try:
+                await event.send(event.plain_result(
+                    f"🎵 开始翻唱：{song_path.name}（{format_seconds(duration)}），"
+                    f"预计约 {estimate_cover_minutes(duration)} 分钟"
+                ))
                 final = await self._run_cover_job(event, song_path, "")
                 await event.send(event.chain_result([_record_for(final)]))
             except VoiceStudioError as exc:
@@ -1321,6 +1369,8 @@ class VoiceStudioPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.exception("[%s] 自动翻唱未预期错误", PLUGIN_NAME)
                 await event.send(event.plain_result(f"❌ 翻唱失败：{exc.__class__.__name__}: {exc}"))
+            finally:
+                self._cover_busy = None
         except Exception:  # noqa: BLE001
             logger.exception("[%s] 歌曲监听失败", PLUGIN_NAME)
 
