@@ -501,6 +501,7 @@ class TestPluginShape(SmokeBase):
         for expected in ("朗读", "音色", "音色导入", "音色删除", "语音状态", "翻唱"):
             self.assertIn(expected, registered, f"命令 {expected} 未注册")
         self.assertIn("语音说", registered["朗读"])
+        self.assertIn("唱歌", registered["翻唱"])
         self.assertEqual(len(FILTER.commands), 6)
 
     def test_plugin_is_independent_from_dsh(self):
@@ -1729,6 +1730,32 @@ class TestRandomVoice(SmokeBase):
             self.run_async(plugin._maybe_random_voice(event))
         self.assertGreater(len(calls), 1)
         self.assertIsInstance(result.chain[0], MAIN.Record)
+
+    def test_random_voice_skips_singing_reply(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload(
+            {"randomVoiceEnabled": True, "randomVoiceTakeover": True}
+        )
+        result = types.SimpleNamespace(chain=[FakePlain("我来给你唱首歌吧")])
+        event = FakeEvent("唱首歌", result=result)
+        calls = []
+
+        async def fake_synthesize(text, **kwargs):
+            calls.append(text)
+            raise AssertionError("singing intent must not go through TTS")
+
+        with mock.patch.object(MAIN.VoiceStudioPlugin, "synthesize_to_file", side_effect=fake_synthesize):
+            self.run_async(plugin._maybe_random_voice(event))
+        self.assertEqual(calls, [])
+        self.assertIsInstance(result.chain[0], FakePlain)
+
+    def test_voice_hint_mentions_rvc_singing(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload({"randomVoiceEnabled": True})
+        event = FakeEvent("hi")
+        request = types.SimpleNamespace(system_prompt="你是助手。")
+        self.run_async(plugin.inject_voice_hint(event, request))
+        self.assertIn("/唱歌", request.system_prompt)
 
 def main():
     unittest.main(verbosity=2)

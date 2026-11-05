@@ -64,6 +64,7 @@ from .voice_store import VoiceStore
 from .web_api import StudioWebAPI
 
 _COMMAND_NAMES = ("语音状态", "音色导入", "音色删除", "语音说", "朗读", "音色", "翻唱")
+_SINGING_HINTS = ("唱歌", "唱一首", "唱首歌", "唱个歌", "来首歌", "翻唱", "唱一段", "sing")
 
 _TTS_CHUNK_LIMIT = 30
 _TTS_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
@@ -637,6 +638,8 @@ class VoiceStudioPlugin(Star):
                 "你不需要、也没有能力自己生成音频文件、发送 record 或申请权限。"
                 "不要回答“无法发送语音”“没有音频文件”“需要开启 Python/Shell 权限”之类的话；"
                 "正常用文字回答即可，系统会把这段文字转成语音。"
+                "当用户要求唱歌/翻唱时，你要说明需要歌曲文件，并使用 /唱歌 <歌曲绝对路径>（RVC 翻唱）；"
+                "不要用文字歌词代替唱歌，也不要声称自己现在就能唱。"
             )
             setattr(request, "system_prompt", str(prompt) + hint)
         except Exception:  # noqa: BLE001 - 提示注入失败不影响正常对话
@@ -689,6 +692,10 @@ class VoiceStudioPlugin(Star):
             text = captured
         if not text:
             logger.info("[%s] 随机语音跳过：没有可用文本（chain=%s captured=%s）", PLUGIN_NAME, bool(chain), len(captured))
+            return
+        haystack = (message_text + " " + text).lower()
+        if any(hint in haystack for hint in _SINGING_HINTS):
+            logger.info("[%s] 随机语音跳过：检测到唱歌/翻唱意图，交由 RVC 翻唱处理", PLUGIN_NAME)
             return
         limit = int(settings.get("randomVoiceMaxChars") or 300)
         if len(text) < 2 or len(text) > limit:
@@ -1022,7 +1029,7 @@ class VoiceStudioPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     # -- 命令：/翻唱 --------------------------------------------------------
-    @filter.command("翻唱")
+    @filter.command("翻唱", alias={"唱歌"})
     async def cover_cmd(self, event: AstrMessageEvent):
         """上传歌曲到 rvc-worker，分离 + 换声 + 本地混音后发送语音条。"""
 
