@@ -338,7 +338,7 @@ audio {
 
       <section class="card" id="random-voice-card">
         <h2>随机语音回复</h2>
-        <p class="hint">开启后，模型会在回复前随机决定用语音代替文字（唱歌不走随机；命令回复也不走随机）。</p>
+        <p class="hint">开启后由语音工坊接管回复：优先用语音工坊合成，失败再回退 AstrBot 官方 TTS；唱歌/命令回复不走接管。</p>
         <div class="row wrap">
           <label class="field">
             <span>启用</span>
@@ -354,6 +354,13 @@ audio {
           <label class="field">
             <span>最长字数</span>
             <input id="random-voice-max-chars" type="number" min="10" max="500" step="1" />
+          </label>
+          <label class="field">
+            <span>接管官方 TTS</span>
+            <select id="random-voice-takeover">
+              <option value="true">开启（每次都用工坊，失败回退官方）</option>
+              <option value="false">关闭（按概率随机）</option>
+            </select>
           </label>
         </div>
         <div class="row wrap">
@@ -525,6 +532,7 @@ const state = {
     randomVoiceEnabled: false,
     randomVoiceProbability: 0.15,
     randomVoiceMaxChars: 80,
+    randomVoiceTakeover: true,
   },
   providers: {},
   workerModels: { models: [], indexes: [] },
@@ -683,6 +691,7 @@ function fillCommonFields() {
   $("random-voice-enabled").value = state.settings.randomVoiceEnabled ? "true" : "false";
   $("random-voice-probability").value = String(state.settings.randomVoiceProbability ?? 0.15);
   $("random-voice-max-chars").value = String(state.settings.randomVoiceMaxChars ?? 80);
+  $("random-voice-takeover").value = state.settings.randomVoiceTakeover === false ? "false" : "true";
   updateEmotionVisibility();
 }
 
@@ -875,6 +884,7 @@ async function saveRandomVoice() {
         randomVoiceEnabled: $("random-voice-enabled").value === "true",
         randomVoiceProbability: Number($("random-voice-probability").value),
         randomVoiceMaxChars: Number($("random-voice-max-chars").value),
+        randomVoiceTakeover: $("random-voice-takeover").value === "true",
       },
     };
     const result = await bridge.apiPost("settings", payload);
@@ -908,6 +918,7 @@ async function saveSettings() {
         randomVoiceEnabled: $("random-voice-enabled").value === "true",
         randomVoiceProbability: Number($("random-voice-probability").value),
         randomVoiceMaxChars: Number($("random-voice-max-chars").value),
+        randomVoiceTakeover: $("random-voice-takeover").value === "true",
       },
     };
     const result = await bridge.apiPost("settings", payload);
@@ -1051,7 +1062,7 @@ function bindEvents() {
   });
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
-  ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars"].forEach(function (id) {
+  ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars", "random-voice-takeover"].forEach(function (id) {
     const node = $(id);
     if (node) node.addEventListener("change", saveRandomVoice);
   });

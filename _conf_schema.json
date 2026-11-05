@@ -448,5 +448,10 @@
     "type": "int",
     "default": 80,
     "slider": {"min": 10, "max": 300, "step": 10}
+  },
+  "randomVoiceTakeover": {
+    "description": "接管官方 TTS：优先用语音工坊合成，失败再回退官方",
+    "type": "bool",
+    "default": true
   }
 }

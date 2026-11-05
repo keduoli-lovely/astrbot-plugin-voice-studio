@@ -118,6 +118,7 @@ const state = {
     randomVoiceEnabled: false,
     randomVoiceProbability: 0.15,
     randomVoiceMaxChars: 80,
+    randomVoiceTakeover: true,
   },
   providers: {},
   workerModels: { models: [], indexes: [] },
@@ -276,6 +277,7 @@ function fillCommonFields() {
   $("random-voice-enabled").value = state.settings.randomVoiceEnabled ? "true" : "false";
   $("random-voice-probability").value = String(state.settings.randomVoiceProbability ?? 0.15);
   $("random-voice-max-chars").value = String(state.settings.randomVoiceMaxChars ?? 80);
+  $("random-voice-takeover").value = state.settings.randomVoiceTakeover === false ? "false" : "true";
   updateEmotionVisibility();
 }
 
@@ -468,6 +470,7 @@ async function saveRandomVoice() {
         randomVoiceEnabled: $("random-voice-enabled").value === "true",
         randomVoiceProbability: Number($("random-voice-probability").value),
         randomVoiceMaxChars: Number($("random-voice-max-chars").value),
+        randomVoiceTakeover: $("random-voice-takeover").value === "true",
       },
     };
     const result = await bridge.apiPost("settings", payload);
@@ -501,6 +504,7 @@ async function saveSettings() {
         randomVoiceEnabled: $("random-voice-enabled").value === "true",
         randomVoiceProbability: Number($("random-voice-probability").value),
         randomVoiceMaxChars: Number($("random-voice-max-chars").value),
+        randomVoiceTakeover: $("random-voice-takeover").value === "true",
       },
     };
     const result = await bridge.apiPost("settings", payload);
@@ -644,7 +648,7 @@ function bindEvents() {
   });
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
-  ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars"].forEach(function (id) {
+  ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars", "random-voice-takeover"].forEach(function (id) {
     const node = $(id);
     if (node) node.addEventListener("change", saveRandomVoice);
   });

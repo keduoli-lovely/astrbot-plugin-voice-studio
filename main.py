@@ -581,6 +581,19 @@ class VoiceStudioPlugin(Star):
         except Exception:  # noqa: BLE001 - 不让钩子影响正常回复
             logger.exception("[%s] 随机语音回复失败", PLUGIN_NAME)
 
+    @filter.on_llm_response()
+    async def capture_llm_text(self, event: AstrMessageEvent, response) -> None:
+        """记录本轮 LLM 回复文本，供结果装饰阶段优先用语音工坊接管。"""
+
+        try:
+            text = getattr(response, "completion_text", None)
+            if text is None:
+                text = getattr(response, "text", None)
+            if text:
+                setattr(event, "_voice_studio_llm_text", str(text))
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _maybe_random_voice(self, event: AstrMessageEvent) -> None:
         settings = self.merged_settings()
         if not bool(settings.get("randomVoiceEnabled")):
@@ -598,35 +611,49 @@ class VoiceStudioPlugin(Star):
             return
         result = event.get_result()
         chain = getattr(result, "chain", None) if result is not None else None
-        if not chain:
-            return
+        takeover = bool(settings.get("randomVoiceTakeover", True))
+        captured = str(getattr(event, "_voice_studio_llm_text", "") or "").strip()
         pieces: list[str] = []
-        for component in chain:
-            text = getattr(component, "text", None)
-            if text is None:
-                return  # 图片 / At / 语音等非纯文本回复保持原样
-            pieces.append(str(text))
-        text = "".join(pieces).strip()
+        text = ""
+        if chain:
+            for component in chain:
+                piece = getattr(component, "text", None)
+                if piece is None:
+                    pieces = []
+                    break
+                pieces.append(str(piece))
+            text = "".join(pieces).strip()
+        # 官方 TTS 可能先把文字换成了语音；接管模式下用捕获的 LLM 原文再合成一次
+        if not text and takeover and captured:
+            text = captured
+        if not text:
+            return
         limit = int(settings.get("randomVoiceMaxChars") or 80)
         if len(text) < 2 or len(text) > limit:
             return
-        probability = float(settings.get("randomVoiceProbability") or 0.0)
-        if probability <= 0 or random.random() >= probability:
-            return
+        if not takeover:
+            probability = float(settings.get("randomVoiceProbability") or 0.0)
+            if probability <= 0 or random.random() >= probability:
+                return
         provider = str(settings.get("ttsProvider") or "indextts")
         meta = tts_providers.PROVIDERS.get(provider) or {}
         supports_emotion = str(meta.get("supports_emotion") or "none") != "none"
         emotion = str(settings.get("defaultEmotion") or "auto")
         if not supports_emotion or emotion in ("", "auto"):
             emotion = None
-        audio_result = await self.synthesize_to_file(
-            text,
-            provider=None,
-            voice=str(settings.get("defaultVoice") or "") or None,
-            emotion=emotion,
-            intensity=float(settings.get("emotionIntensity") or 0.6),
-        )
-        audio_path = await audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir())
+        try:
+            audio_result = await self.synthesize_to_file(
+                text,
+                provider=None,
+                voice=str(settings.get("defaultVoice") or "") or None,
+                emotion=emotion,
+                intensity=float(settings.get("emotionIntensity") or 0.6),
+            )
+            audio_path = await audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir())
+        except Exception:  # noqa: BLE001 - 失败时保留原结果，交给官方 TTS 兜底
+            logger.exception("[%s] 语音工坊接管失败，回退官方 TTS", PLUGIN_NAME)
+            return
+        logger.info("[%s] 语音工坊接管回复为语音：%s 字", PLUGIN_NAME, len(text))
         result.chain = [_record_for(audio_path)]
 
     # -- 命令：/朗读 --------------------------------------------------------

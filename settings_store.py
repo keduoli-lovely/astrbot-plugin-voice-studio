@@ -225,6 +225,14 @@ def validate_settings_patch(payload: object) -> dict:
         except (TypeError, ValueError) as exc:
             raise VoiceStudioError("randomVoiceMaxChars 必须是整数") from exc
         patch["randomVoiceMaxChars"] = max(10, min(500, max_chars))
+    if "randomVoiceTakeover" in payload:
+        value = payload.get("randomVoiceTakeover")
+        if isinstance(value, bool):
+            patch["randomVoiceTakeover"] = value
+        elif isinstance(value, str):
+            patch["randomVoiceTakeover"] = value.strip().lower() in {"1", "true", "yes", "on", "开启"}
+        else:
+            patch["randomVoiceTakeover"] = bool(value)
     return patch
 
 
@@ -333,6 +341,11 @@ def merge_settings(stored: dict | None, astrbot_config: object) -> dict:
     except (TypeError, ValueError):
         random_voice_max_chars = 80
     random_voice_max_chars = max(10, min(500, random_voice_max_chars))
+    random_voice_takeover = (
+        bool(stored.get("randomVoiceTakeover"))
+        if "randomVoiceTakeover" in stored
+        else conf_bool(config, "randomVoiceTakeover", True)
+    )
 
     return {
         "ttsProvider": provider,
@@ -345,6 +358,7 @@ def merge_settings(stored: dict | None, astrbot_config: object) -> dict:
         "randomVoiceEnabled": random_voice_enabled,
         "randomVoiceProbability": max(0.0, min(1.0, random_voice_probability)),
         "randomVoiceMaxChars": random_voice_max_chars,
+        "randomVoiceTakeover": random_voice_takeover,
     }
 
 

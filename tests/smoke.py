@@ -149,6 +149,13 @@ class FakeFilter:
 
         return decorator
 
+    def on_llm_response(self):
+        def decorator(func):
+            self.hooks.append(func)
+            return func
+
+        return decorator
+
     def command(self, name, alias=None, priority: int = 0):
         def decorator(func):
             self.commands.append((name, set(alias or ())))
@@ -1606,6 +1613,59 @@ class TestRandomVoice(SmokeBase):
         self.run_async(plugin._maybe_random_voice(event))
         self.assertIsInstance(result.chain[0], FakePlain)
 
+
+    def test_takeover_rewrites_official_tts_record(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload(
+            {
+                "randomVoiceEnabled": True,
+                "randomVoiceTakeover": True,
+                "randomVoiceProbability": 0.0,
+            }
+        )
+        plugin._tmp_dir().mkdir(parents=True, exist_ok=True)
+        official = MAIN.Record(file="/official/tts.wav", path="/official/tts.wav")
+        result = types.SimpleNamespace(chain=[official])
+        event = FakeEvent("hi", result=result)
+        setattr(event, "_voice_studio_llm_text", "你好呀")
+
+        async def fake_synthesize(text, **kwargs):
+            dest = plugin._tmp_dir() / "takeover.wav"
+            write_wav(dest, channels=1, sample_rate=22050, seconds=0.1, freq=440, amp=0.2)
+            return {"path": dest, "format": "wav"}
+
+        with mock.patch.object(MAIN.VoiceStudioPlugin, "synthesize_to_file", side_effect=fake_synthesize):
+            self.run_async(plugin._maybe_random_voice(event))
+        self.assertEqual(len(result.chain), 1)
+        self.assertIsInstance(result.chain[0], MAIN.Record)
+        self.assertNotEqual(result.chain[0].path, "/official/tts.wav")
+
+    def test_takeover_falls_back_on_synthesis_failure(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload(
+            {
+                "randomVoiceEnabled": True,
+                "randomVoiceTakeover": True,
+            }
+        )
+        official = MAIN.Record(file="/official/tts.wav", path="/official/tts.wav")
+        result = types.SimpleNamespace(chain=[official])
+        event = FakeEvent("hi", result=result)
+        setattr(event, "_voice_studio_llm_text", "你好呀")
+
+        async def boom(text, **kwargs):
+            raise RuntimeError("tts down")
+
+        with mock.patch.object(MAIN.VoiceStudioPlugin, "synthesize_to_file", side_effect=boom):
+            self.run_async(plugin._maybe_random_voice(event))
+        self.assertIs(result.chain[0], official)
+
+    def test_capture_llm_text(self):
+        plugin = make_plugin()
+        event = FakeEvent("hi")
+        response = types.SimpleNamespace(completion_text="捕获的回复")
+        self.run_async(plugin.capture_llm_text(event, response))
+        self.assertEqual(getattr(event, "_voice_studio_llm_text"), "捕获的回复")
 
 def main():
     unittest.main(verbosity=2)
