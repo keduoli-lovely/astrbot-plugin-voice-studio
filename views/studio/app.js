@@ -110,7 +110,6 @@ const state = {
   settings: {
     ttsProvider: "indextts",
     providers: {},
-  workerModels: { models: [], indexes: [] },
     worker: {},
     defaultVoice: "",
     defaultEmotion: "auto",
@@ -118,6 +117,7 @@ const state = {
     ttsSpeed: 1.0,
   },
   providers: {},
+  workerModels: { models: [], indexes: [] },
   voices: [],
 };
 
