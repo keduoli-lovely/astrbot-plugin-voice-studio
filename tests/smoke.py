@@ -117,9 +117,14 @@ class FakeEvent:
         self._group_id = str(group_id or "")
         self._result = result
         self.stopped = False
+        self.sent = []
 
     def get_result(self):
         return self._result
+
+    async def send(self, result):
+        self.sent.append(result)
+        return result
 
     def get_group_id(self):
         return self._group_id
@@ -137,10 +142,19 @@ class FakeEvent:
         self.stopped = True
 
 
+class FakeEventMessageType:
+    ALL = "ALL"
+    PRIVATE_MESSAGE = "PRIVATE_MESSAGE"
+    GROUP_MESSAGE = "GROUP_MESSAGE"
+
+
 class FakeFilter:
+    EventMessageType = FakeEventMessageType
+
     def __init__(self):
         self.commands: list[tuple[str, set[str]]] = []
         self.hooks: list = []
+        self.listeners: list = []
 
     def on_decorating_result(self):
         def decorator(func):
@@ -159,6 +173,13 @@ class FakeFilter:
     def on_llm_request(self):
         def decorator(func):
             self.hooks.append(func)
+            return func
+
+        return decorator
+
+    def event_message_type(self, message_type):
+        def decorator(func):
+            self.listeners.append(func)
             return func
 
         return decorator
@@ -1780,6 +1801,33 @@ class TestRandomVoice(SmokeBase):
         event, results = self.run_handler(plugin, "cover_cmd", "")
         joined = " ".join(str(item[1]) for item in results if isinstance(item, tuple))
         self.assertIn("再发送 /唱歌", joined)
+
+    def test_song_listener_asks_for_song(self):
+        plugin = make_plugin()
+        event = FakeEvent("唱首海屿你")
+        self.run_async(plugin.song_listener(event))
+        self.assertTrue(event.stopped)
+        self.assertEqual(len(event.sent), 1)
+        self.assertIn("歌曲音频", str(event.sent[0][1]))
+
+    def test_song_listener_covers_uploaded_song(self):
+        plugin = make_plugin()
+        song = write_wav(self.tmp / "song.wav", seconds=0.1)
+        record_type = type("Record", (), {})
+        component = record_type()
+        component.file = str(song)
+        event = FakeEvent("")
+        event.message_obj = types.SimpleNamespace(message=[component])
+        plugin._pending_song["default"] = 9_999_999_999.0
+
+        async def fake_cover(event_obj, song_path, model):
+            return write_wav(self.tmp / "cover_out.wav", seconds=0.1)
+
+        with mock.patch.object(MAIN.VoiceStudioPlugin, "_run_cover_job", side_effect=fake_cover):
+            self.run_async(plugin.song_listener(event))
+        texts = [str(item[1]) for item in event.sent if isinstance(item, tuple)]
+        self.assertTrue(any("收到" in text for text in texts), texts)
+        self.assertTrue(any("chain" in str(item[0]) for item in event.sent if isinstance(item, tuple)))
 
 def main():
     unittest.main(verbosity=2)

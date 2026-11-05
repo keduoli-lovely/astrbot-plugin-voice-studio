@@ -64,7 +64,10 @@ from .voice_store import VoiceStore
 from .web_api import StudioWebAPI
 
 _COMMAND_NAMES = ("语音状态", "音色导入", "音色删除", "语音说", "朗读", "音色", "翻唱")
-_SINGING_HINTS = ("唱歌", "唱一首", "唱首歌", "唱个歌", "来首歌", "翻唱", "唱一段", "sing")
+_SINGING_HINTS = (
+    "唱歌", "唱首", "唱一首", "唱首歌", "唱个歌", "唱一段", "来首歌", "来一首",
+    "来首", "想听", "翻唱", "sing",
+)
 
 _TTS_CHUNK_LIMIT = 30
 _TTS_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
@@ -151,6 +154,25 @@ def _message_audio_source(event: AstrMessageEvent) -> Path | str | None:
         if url and str(url).lower().startswith(("http://", "https://")):
             return str(url)
     return None
+
+
+def _session_key(event: AstrMessageEvent) -> str:
+    origin = getattr(event, "unified_msg_origin", None)
+    if origin:
+        return str(origin)
+    group = _group_id(event)
+    if group:
+        return "group:" + group
+    for getter in ("get_sender_id", "get_user_id"):
+        func = getattr(event, getter, None)
+        if callable(func):
+            try:
+                value = func()
+            except Exception:  # noqa: BLE001
+                value = None
+            if value:
+                return "user:" + str(value)
+    return "default"
 
 
 def _command_arg(message_str: str) -> str:
@@ -355,6 +377,7 @@ class VoiceStudioPlugin(Star):
         self._http_client = None
         self._voice_store: VoiceStore | None = None
         self._settings_store = SettingsStore(self._data_dir / "settings.json")
+        self._pending_song: dict[str, float] = {}
         self._web_api: StudioWebAPI | None = None
         try:
             self._web_api = StudioWebAPI(self)
@@ -1115,6 +1138,18 @@ class VoiceStudioPlugin(Star):
             )
             return
 
+        try:
+            final = await self._run_cover_job(event, song_path, model)
+            yield event.chain_result([_record_for(final)])
+        except VoiceStudioError as exc:
+            yield event.plain_result(f"❌ 翻唱失败：{exc}")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[%s] /翻唱 未预期错误", PLUGIN_NAME)
+            yield event.plain_result(f"❌ 翻唱失败：{exc.__class__.__name__}: {exc}")
+
+    async def _run_cover_job(self, event: AstrMessageEvent, song_path: Path, model: str) -> Path:
+        """执行 RVC 翻唱全流程，进度通过 event.send 发出，返回最终音频路径。"""
+
         worker_settings = self.effective_worker()
         progress = conf_bool(self.config, "sendProgress", True)
         max_duration = max(10, conf_int(self.config, "maxDurationSec", 600))
@@ -1127,111 +1162,180 @@ class VoiceStudioPlugin(Star):
         if not model:
             model = str(worker_settings.get("model") or "")
 
+        base_url = worker.normalize_base(str(worker_settings.get("url") or ""))
+        token = str(worker_settings.get("token") or "")
+        client = await self._http()
+        await asyncio.to_thread(self._cleanup_tmp)
+
+        duration = await audio.probe_duration(song_path)
+        if duration is not None and duration > max_duration:
+            raise VoiceStudioError(
+                f"歌曲时长 {format_seconds(duration)} 超过上限 {max_duration} 秒"
+                "（可在配置 maxDurationSec 调整）。"
+            )
+        if progress:
+            await event.send(event.plain_result(
+                f"🎵 开始翻唱：{song_path.name}（{format_seconds(duration)}）\n"
+                "流程：上传 → 人声分离 → 换声 → 混音，可能需要几分钟…"
+            ))
+
+        if not model:
+            model = await self._first_model(client, base_url, token)
+
+        file_id = await worker.upload_file(client, base_url, token, song_path)
+        if progress:
+            await event.send(event.plain_result("📤 上传完成，正在做人声分离…"))
+        separate_job = await worker.create_job(
+            client, base_url, token, "separate", file_id, {"mode": "vocals", "format": "wav"}
+        )
+        separate = await worker.wait_job(
+            client, base_url, token, separate_job, timeout_s=job_timeout, logger=logger
+        )
+        outputs = separate.get("outputs") or []
+        if not isinstance(outputs, list):
+            outputs = []
+        vocal_out = _pick_output(outputs, ("vocal", "人声"))
+        inst_out = _pick_output(outputs, ("instrument", "accompaniment", "inst", "伴奏"))
+        if vocal_out is None or inst_out is None:
+            raise VoiceStudioError(
+                "分离任务的输出里没有 vocal / instrumental："
+                + str([item.get("name") for item in outputs if isinstance(item, dict)])
+            )
+
+        work_dir = self._tmp_dir() / f"cover_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        vocal_wav = work_dir / "vocal.wav"
+        inst_wav = work_dir / "instrumental.wav"
+        await worker.download_job_output(
+            client, base_url, token, separate_job, str(vocal_out.get("name") or "vocal.wav"), vocal_wav
+        )
+        await worker.download_job_output(
+            client, base_url, token, separate_job, str(inst_out.get("name") or "instrumental.wav"), inst_wav
+        )
+
+        actual_duration = audio.wav_duration_sec(inst_wav)
+        if actual_duration is not None and actual_duration > max_duration:
+            raise VoiceStudioError(
+                f"歌曲实际时长 {format_seconds(actual_duration)} 超过上限 {max_duration} 秒。"
+            )
+
+        if progress:
+            await event.send(event.plain_result(
+                f"🎤 分离完成，正在换声（模型：{model}，变调：{key_shift:+d}）…"
+            ))
+
+        convert_params: dict[str, Any] = {
+            "model": model,
+            "f0_method": f0_method,
+            "f0_up_key": int(key_shift),
+            "index_rate": 0.75,
+            "rms_mix": 0.25,
+            "protect": 0.33,
+        }
+        index = str(worker_settings.get("index") or "")
+        if index:
+            convert_params["index"] = index
+        convert_job = await worker.create_job(
+            client, base_url, token, "convert", str(vocal_out.get("fileId")), convert_params
+        )
+        converted = await worker.wait_job(
+            client, base_url, token, convert_job, timeout_s=job_timeout, logger=logger
+        )
+        converted_outputs = converted.get("outputs") or []
+        if not isinstance(converted_outputs, list):
+            converted_outputs = []
+        converted_out = _pick_output(converted_outputs, ("convert", "vocal", "人声"))
+        if converted_out is None:
+            converted_out = next(
+                (item for item in converted_outputs if isinstance(item, dict) and item.get("fileId")),
+                None,
+            )
+        if converted_out is None:
+            raise VoiceStudioError("换声任务的输出里没有音频文件")
+        converted_wav = work_dir / "converted.wav"
+        await worker.download_job_output(
+            client, base_url, token, convert_job, str(converted_out.get("name") or "converted.wav"), converted_wav
+        )
+
+        if progress:
+            await event.send(event.plain_result("🎚️ 换声完成，正在混音…"))
+        mixed = work_dir / "cover.wav"
+        await asyncio.to_thread(audio.mix_cover, inst_wav, converted_wav, vocal_wav, mixed)
+        return await self._finalize_cover(mixed)
+
+    # -- 监听：用户发来歌曲后自动翻唱 --------------------------------------
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def song_listener(self, event: AstrMessageEvent):
+        """用户说想听歌 → 要歌曲文件；收到歌曲 → 自动 RVC 翻唱，无需 /唱歌。"""
+
         try:
-            base = worker.normalize_base(str(worker_settings.get("url") or ""))
-            token = str(worker_settings.get("token") or "")
+            if self._check_allowed(event):
+                return
+            message_text = _message_text(event).strip()
+            if message_text.startswith(("/", "／")):
+                return  # 命令交给自己处理
+            first_token = message_text.lstrip("/／").split()[0] if message_text.strip("/／") else ""
+            if first_token in _COMMAND_NAMES or first_token == "唱歌":
+                return  # 命令/别名消息交给命令处理
+            attachment = _message_audio_source(event)
+            singing = any(hint in (message_text or "").lower() for hint in _SINGING_HINTS)
+            key = _session_key(event)
+            now = time.time()
+            pending = now - self._pending_song.get(key, 0.0) < 600
+
+            if attachment is None:
+                if singing:
+                    self._pending_song[key] = now
+                    await event.send(event.plain_result(
+                        "想听我翻唱哪首歌？把歌曲音频文件发给我，我收到就直接开唱（不用发 /唱歌）。"
+                    ))
+                    if hasattr(event, "stop_event"):
+                        event.stop_event()
+                return
+
+            if not singing and not pending:
+                return  # 没有在等歌曲时，普通音频不处理
+
+            song_path = await self._resolve_audio_attachment(attachment)
+            if song_path is None:
+                return
+            if song_path.suffix.lower() not in SONG_SUFFIXES:
+                await event.send(event.plain_result(
+                    f"❌ 不支持的音频格式：{song_path.suffix}，支持 " + " / ".join(sorted(SONG_SUFFIXES))
+                ))
+                if hasattr(event, "stop_event"):
+                    event.stop_event()
+                return
+
+            self._pending_song.pop(key, None)
+            await event.send(event.plain_result(
+                f"✅ 收到《{song_path.name}》，正在接收并准备开始唱…"
+            ))
+            if hasattr(event, "stop_event"):
+                event.stop_event()
+            try:
+                final = await self._run_cover_job(event, song_path, "")
+                await event.send(event.chain_result([_record_for(final)]))
+            except VoiceStudioError as exc:
+                await event.send(event.plain_result(f"❌ 翻唱失败：{exc}"))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("[%s] 自动翻唱未预期错误", PLUGIN_NAME)
+                await event.send(event.plain_result(f"❌ 翻唱失败：{exc.__class__.__name__}: {exc}"))
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] 歌曲监听失败", PLUGIN_NAME)
+
+    async def _resolve_audio_attachment(self, attachment: Path | str) -> Path | None:
+        if isinstance(attachment, Path) and attachment.is_file():
+            return attachment
+        if isinstance(attachment, str) and attachment.lower().startswith(("http://", "https://")):
             client = await self._http()
-            await asyncio.to_thread(self._cleanup_tmp)
-
-            duration = await audio.probe_duration(song_path)
-            if duration is not None and duration > max_duration:
-                raise VoiceStudioError(
-                    f"歌曲时长 {format_seconds(duration)} 超过上限 {max_duration} 秒"
-                    "（可在配置 maxDurationSec 调整）。"
-                )
-            if progress:
-                yield event.plain_result(
-                    f"🎵 开始翻唱：{song_path.name}（{format_seconds(duration)}）\n"
-                    "流程：上传 → 人声分离 → 换声 → 混音，可能需要几分钟…"
-                )
-
-            if not model:
-                model = await self._first_model(client, base, token)
-
-            file_id = await worker.upload_file(client, base, token, song_path)
-            if progress:
-                yield event.plain_result("📤 上传完成，正在做人声分离…")
-            separate_job = await worker.create_job(
-                client, base, token, "separate", file_id, {"mode": "vocals", "format": "wav"}
-            )
-            separate = await worker.wait_job(
-                client, base, token, separate_job, timeout_s=job_timeout, logger=logger
-            )
-            outputs = separate.get("outputs") or []
-            if not isinstance(outputs, list):
-                outputs = []
-            vocal_out = _pick_output(outputs, ("vocal", "人声"))
-            inst_out = _pick_output(outputs, ("instrument", "accompaniment", "inst", "伴奏"))
-            if vocal_out is None or inst_out is None:
-                raise VoiceStudioError(
-                    "分离任务的输出里没有 vocal / instrumental："
-                    + str([item.get("name") for item in outputs if isinstance(item, dict)])
-                )
-
-            work_dir = self._tmp_dir() / f"cover_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            vocal_wav = work_dir / "vocal.wav"
-            inst_wav = work_dir / "instrumental.wav"
-            await worker.download_job_output(
-                client, base, token, separate_job, str(vocal_out.get("name") or "vocal.wav"), vocal_wav
-            )
-            await worker.download_job_output(
-                client, base, token, separate_job, str(inst_out.get("name") or "instrumental.wav"), inst_wav
-            )
-
-            actual_duration = audio.wav_duration_sec(inst_wav)
-            if actual_duration is not None and actual_duration > max_duration:
-                raise VoiceStudioError(
-                    f"歌曲实际时长 {format_seconds(actual_duration)} 超过上限 {max_duration} 秒。"
-                )
-
-            if progress:
-                yield event.plain_result(f"🎤 分离完成，正在换声（模型：{model}，变调：{key_shift:+d}）…")
-
-            convert_params: dict[str, Any] = {
-                "model": model,
-                "f0_method": f0_method,
-                "f0_up_key": int(key_shift),
-                "index_rate": 0.75,
-                "rms_mix": 0.25,
-                "protect": 0.33,
-            }
-            index = str(worker_settings.get("index") or "")
-            if index:
-                convert_params["index"] = index
-            convert_job = await worker.create_job(
-                client, base, token, "convert", str(vocal_out.get("fileId")), convert_params
-            )
-            converted = await worker.wait_job(
-                client, base, token, convert_job, timeout_s=job_timeout, logger=logger
-            )
-            converted_outputs = converted.get("outputs") or []
-            if not isinstance(converted_outputs, list):
-                converted_outputs = []
-            converted_out = _pick_output(converted_outputs, ("convert", "vocal", "人声"))
-            if converted_out is None:
-                converted_out = next(
-                    (item for item in converted_outputs if isinstance(item, dict) and item.get("fileId")),
-                    None,
-                )
-            if converted_out is None:
-                raise VoiceStudioError("换声任务的输出里没有音频文件")
-            converted_wav = work_dir / "converted.wav"
-            await worker.download_job_output(
-                client, base, token, convert_job, str(converted_out.get("name") or "converted.wav"), converted_wav
-            )
-
-            if progress:
-                yield event.plain_result("🎚️ 换声完成，正在混音…")
-            mixed = work_dir / "cover.wav"
-            await asyncio.to_thread(audio.mix_cover, inst_wav, converted_wav, vocal_wav, mixed)
-            final = await self._finalize_cover(mixed)
-            yield event.chain_result([_record_for(final)])
-        except VoiceStudioError as exc:
-            yield event.plain_result(f"❌ 翻唱失败：{exc}")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[%s] /翻唱 未预期错误", PLUGIN_NAME)
-            yield event.plain_result(f"❌ 翻唱失败：{exc.__class__.__name__}: {exc}")
+            response = await client.get(attachment, timeout=120.0)
+            response.raise_for_status()
+            suffix = Path(attachment.split("?")[0]).suffix or ".mp3"
+            dest = self._tmp_dir() / f"incoming_song_{uuid.uuid4().hex[:8]}{suffix}"
+            dest.write_bytes(response.content)
+            return dest
+        return None
 
     async def _first_model(self, client, base: str, token: str) -> str:
         data = await worker.models(client, base, token)
