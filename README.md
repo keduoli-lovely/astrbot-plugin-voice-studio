@@ -1,7 +1,7 @@
 # 语音工坊 · AstrBot 插件（独立版 v0.3.0）
 
 AstrBot 原生的语音工坊插件：**不依赖 DSH**。TTS 由插件自己直接请求各提供商 HTTP API，
-参考音色库放在插件目录 `data/voices/`，情绪用内置词典，翻唱只依赖独立的 `rvc-worker`，
+参考音色库放在 AstrBot 插件数据目录 `data/plugin_data/astrbot_plugin_voice_studio/voices/`，情绪用内置词典，翻唱只依赖独立的 `rvc-worker`，
 最后通过 AstrBot 的 OneBot v11 适配器发 **Record 语音条**。
 
 v0.3.0 新增 **可视化设置页「语音工坊」**（插件详情页 → 语音工坊）：
@@ -11,7 +11,7 @@ v0.3.0 新增 **可视化设置页「语音工坊」**（插件详情页 → 语
 - 翻唱 worker 地址、Token、模型、Index、F0、变调；「测试连接」与进程启停；
 - 输入文本 + 选音色/情绪，直接试听（base64 data URI 播放）。
 
-设置写入插件自己的 `data/settings.json`，读取顺序 **`data/settings.json` > AstrBot 插件配置**，
+设置写入 AstrBot 插件数据目录的 `settings.json`，读取顺序 **`data/settings.json` > AstrBot 插件配置**，
 旧配置仍向后兼容。
 
 ---
@@ -81,7 +81,7 @@ astrbot-plugin-voice-studio/
 ├── .gitignore                 # data/ 运行数据不进仓库
 ├── .astrbot-plugin/i18n/      # zh-CN.json / en-US.json（设置页标题/描述）
 ├── views/studio/              # 设置页：index.html + app.js + style.css（无第三方 JS）
-├── data/                      # 运行时生成（gitignore）：voices/、voices.json、settings.json、tmp/
+└── （用户数据不在插件目录）   # 运行时写在 <AstrBot>/data/plugin_data/astrbot_plugin_voice_studio/：voices/、voices.json、settings.json、tmp/
 └── tests/
     ├── smoke.py               # 71 个离线测试（mock AstrBot / httpx / worker）
     └── real_indextts.py       # IndexTTS 真机测试（可独立运行）
@@ -252,12 +252,12 @@ WebUI → 插件 → 重载插件。然后打开插件详情页，点「语音�
 
 ## 九、音色库
 
-- 默认目录：`<插件目录>/data/voices/`（`voiceDir` 可改）；元数据：`data/voices.json`。
+- 默认目录：`<AstrBot>/data/plugin_data/astrbot_plugin_voice_studio/voices/`（`voiceDir` 可改，相对路径基于该数据目录）；元数据：`voices.json`。
 - 导入 = **复制** 进库，不引用原文件；删除不会动你原来的音频。
 - 限制：单文件 ≤ 30MB；后缀白名单见上；重名自动加序号（`音色`、`音色 (2)`…）。
 - 三种导入方式：设置页上传、设置页服务器路径导入、`/音色导入` 命令。
 - 删除前需要 `--yes` 二次确认；文件缺失的音色在列表中标注「文件缺失」。
-- `data/` 已写入 `.gitignore`，插件更新/重装不会覆盖用户音色库（仍建议备份 `data/voices*`）。
+- 用户数据放在 AstrBot 的 `data/plugin_data/` 下，**插件更新/重装不会丢失音色与设置**（仍建议备份）。
 
 ---
 
@@ -401,7 +401,7 @@ python -B tests/real_indextts.py
 ## 十五、独立运行说明（不依赖 DSH）
 
 - TTS：`tts_providers.py` 直接实现 6 个提供商，只依赖 `httpx` 与标准库；
-- 音色库：插件目录 `data/voices/` + `data/voices.json`，设置页/命令自持自管；
+- 音色库：插件数据目录 `plugin_data/astrbot_plugin_voice_studio/voices/` + `voices.json`，设置页/命令自持自管；
 - 设置：插件目录 `data/settings.json`，不依赖 AstrBot 配置里的 provider 字段；
 - 情绪：`emotion.py` 内置词典，不查询任何 DSH 情绪服务；
 - 翻唱：只依赖独立的 `rvc-worker` 服务（HTTP），不访问 RVC WebUI；
