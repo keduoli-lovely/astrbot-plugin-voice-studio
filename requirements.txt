@@ -1,0 +1,6 @@
+# AstrBot 插件依赖（pip 安装）。
+# AstrBot 官方建议插件使用异步 HTTP 库，不要用 requests。
+httpx>=0.26,<1
+# 仅用于 /翻唱 的本地混音（读取 wav、重采样、RMS 对齐、峰值归一化）。
+# /朗读、/音色、/语音状态 不需要 numpy。
+numpy>=1.24,<3

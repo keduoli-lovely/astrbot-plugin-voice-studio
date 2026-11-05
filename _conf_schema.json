@@ -1,0 +1,102 @@
+{
+  "voiceStudioUrl": {
+    "description": "语音工坊服务地址（DSH Web 服务的 origin，不要带 /tts-studio 后缀）",
+    "type": "string",
+    "default": "http://127.0.0.1:6716",
+    "hint": "语音工坊路由是 {voiceStudioUrl}/tts-studio/api/...。DSH 每次启动端口可能变化，请以 DSH Web GUI 的地址为准。"
+  },
+  "voiceStudioToken": {
+    "description": "访问语音工坊的 Bearer Token（可选，仅当你在前面放了反向代理鉴权时填写）",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "workerUrl": {
+    "description": "rvc-worker 服务地址（默认 0.0.0.0:7870 对应 http://127.0.0.1:7870）",
+    "type": "string",
+    "default": "http://127.0.0.1:7870"
+  },
+  "workerToken": {
+    "description": "rvc-worker 的 Bearer Token（启动 worker 时的 --token，未配置 token 时留空）",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "defaultProvider": {
+    "description": "默认 TTS 提供商",
+    "type": "string",
+    "default": "",
+    "hint": "留空表示跟随语音工坊设置。可选：indextts / gptsovits / siliconflow / minimax / mimo / openai。",
+    "options": ["", "indextts", "gptsovits", "siliconflow", "minimax", "mimo", "openai"]
+  },
+  "defaultVoice": {
+    "description": "默认参考音色（音色 id 或名称）",
+    "type": "string",
+    "default": "",
+    "hint": "留空表示使用语音工坊里配置的默认音色；本地提供商（indextts/gptsovits）必须有参考音色。"
+  },
+  "defaultEmotion": {
+    "description": "默认情绪",
+    "type": "string",
+    "default": "auto",
+    "hint": "auto=交给语音工坊自动判断；也可填 neutral/happy/angry/sad/fear/disgust/down/surprise/calm，或 happy:0.8 这种带强度写法。"
+  },
+  "allowedGroups": {
+    "description": "允许使用语音命令的群号白名单（留空=不限制）",
+    "type": "list",
+    "default": [],
+    "hint": "例如 [\"123456789\"]；私聊不受限制。"
+  },
+  "maxDurationSec": {
+    "description": "翻唱允许的最长歌曲时长（秒）",
+    "type": "int",
+    "default": 600,
+    "slider": { "min": 30, "max": 3600, "step": 30 }
+  },
+  "maxTextLen": {
+    "description": "单次朗读允许的最长文本字数",
+    "type": "int",
+    "default": 1000,
+    "slider": { "min": 50, "max": 5000, "step": 50 }
+  },
+  "jobTimeoutSec": {
+    "description": "rvc-worker 单个任务（分离/换声）最长等待秒数",
+    "type": "int",
+    "default": 1800,
+    "slider": { "min": 120, "max": 7200, "step": 60 }
+  },
+  "requestTimeoutSec": {
+    "description": "TTS 请求读取超时（秒）",
+    "type": "int",
+    "default": 600,
+    "slider": { "min": 30, "max": 1800, "step": 30 }
+  },
+  "sendProgress": {
+    "description": "翻唱过程中发送阶段提示（开始、分离完成、换声完成）",
+    "type": "bool",
+    "default": true
+  },
+  "workerModel": {
+    "description": "RVC 模型（.pth 的 id 或文件名）",
+    "type": "string",
+    "default": "",
+    "hint": "留空时插件会调用 GET /v1/models 取第一个可用模型。"
+  },
+  "workerIndex": {
+    "description": "RVC index 文件（可选）",
+    "type": "string",
+    "default": ""
+  },
+  "workerF0Method": {
+    "description": "音高提取方法",
+    "type": "string",
+    "default": "rmvpe",
+    "options": ["rmvpe", "pm", "harvest", "crepe", "fcpe"]
+  },
+  "workerKeyShift": {
+    "description": "变调（半音，男声翻女声常用 +12，反之 -12）",
+    "type": "int",
+    "default": 0,
+    "slider": { "min": -24, "max": 24, "step": 1 }
+  }
+}

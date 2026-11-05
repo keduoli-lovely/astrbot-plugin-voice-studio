@@ -1,0 +1,19 @@
+name: astrbot_plugin_voice_studio
+display_name: 语音工坊
+short_desc: 用语音工坊朗读文本、翻唱歌曲，并直接发出 QQ 语音条。
+desc: |
+  把 DSH「语音工坊」的语音能力接进 AstrBot（OneBot v11 / aiocqhttp）：
+
+  - `/朗读 <文本>`（别名 `/语音说`）：调用语音工坊 TTS，发回语音条。
+  - `/翻唱 <歌曲绝对路径> [模型]`：上传歌曲到 rvc-worker，人声分离 + RVC 换声，
+    在插件内做 RMS 对齐与峰值归一化混音后发回语音条。
+  - `/音色`：列出语音工坊参考音色库。
+  - `/语音状态`：检查语音工坊与 rvc-worker 的连通性。
+
+  所有能力都走 HTTP，不依赖 torch / RVC 本地环境。语种：中文命令。
+version: 0.1.0
+author: DSH 语音工坊移植
+repo: https://github.com/keduoli-lovely/astrbot-plugin-voice-studio
+astrbot_version: ">=4.0.0"
+support_platforms:
+  - aiocqhttp
