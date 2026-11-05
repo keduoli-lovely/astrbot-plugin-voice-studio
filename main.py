@@ -74,32 +74,6 @@ _SINGING_HINTS = (
     "来首", "想听", "翻唱", "sing",
 )
 
-_TTS_CHUNK_LIMIT = 30
-_TTS_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
-
-
-def split_for_tts(text: str, limit: int = _TTS_CHUNK_LIMIT) -> list[str]:
-    """把长文本按句切成小块，避免 IndexTTS 长输入卡死。"""
-
-    pieces = [piece.strip() for piece in _TTS_SENTENCE_SPLIT.split(str(text or "")) if piece.strip()]
-    chunks: list[str] = []
-    current = ""
-    for piece in pieces:
-        if len(piece) > limit:
-            if current:
-                chunks.append(current)
-                current = ""
-            for start in range(0, len(piece), limit):
-                chunks.append(piece[start:start + limit])
-            continue
-        if len(current) + len(piece) > limit and current:
-            chunks.append(current)
-            current = ""
-        current += piece
-    if current:
-        chunks.append(current)
-    return chunks or ([str(text).strip()] if str(text).strip() else [])
-
 _READ_OPTION_RE = re.compile(
     r"^\s*-(?P<flag>[vVeEiIpPsS])(?:\s+|:)(?P<value>\"[^\"]*\"|'[^']*'|\S+)\s*"
 )
@@ -786,34 +760,28 @@ class VoiceStudioPlugin(Star):
         emotion = str(settings.get("defaultEmotion") or "auto")
         if not supports_emotion or emotion in ("", "auto"):
             emotion = None
-        chunks = split_for_tts(text)
-        wav_parts: list[Path] = []
         try:
-            for index, chunk in enumerate(chunks):
-                audio_result = await asyncio.wait_for(
-                    self.synthesize_to_file(
-                        chunk,
-                        provider=None,
-                        voice=str(settings.get("defaultVoice") or "") or None,
-                        emotion=emotion,
-                        intensity=float(settings.get("emotionIntensity") or 0.6),
-                    ),
-                    timeout=60.0,
-                )
-                part = await asyncio.wait_for(
-                    audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir()),
-                    timeout=30.0,
-                )
-                wav_parts.append(Path(part))
-                logger.info("[%s] 语音工坊分段 %s/%s 完成（%s 字）", PLUGIN_NAME, index + 1, len(chunks), len(chunk))
-            audio_path = self._concat_wavs(wav_parts)
+            audio_result = await asyncio.wait_for(
+                self.synthesize_to_file(
+                    text,
+                    provider=None,
+                    voice=str(settings.get("defaultVoice") or "") or None,
+                    emotion=emotion,
+                    intensity=float(settings.get("emotionIntensity") or 0.6),
+                ),
+                timeout=240.0,
+            )
+            audio_path = await asyncio.wait_for(
+                audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir()),
+                timeout=60.0,
+            )
         except asyncio.TimeoutError:
-            logger.warning("[%s] 语音工坊合成超时，回退官方 TTS", PLUGIN_NAME)
+            logger.warning("[%s] 语音工坊合成超时（240s），回退官方 TTS", PLUGIN_NAME)
             return
         except Exception:  # noqa: BLE001 - 失败时保留原结果，交给官方 TTS 兜底
             logger.exception("[%s] 语音工坊接管失败，回退官方 TTS", PLUGIN_NAME)
             return
-        logger.info("[%s] 语音工坊接管回复为语音：%s 字，%s 段", PLUGIN_NAME, len(text), len(chunks))
+        logger.info("[%s] 语音工坊接管回复为语音：%s 字（全段）", PLUGIN_NAME, len(text))
         result.chain = [_record_for(audio_path)]
 
     # -- 命令：/朗读 --------------------------------------------------------

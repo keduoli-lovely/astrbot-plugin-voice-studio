@@ -1713,14 +1713,6 @@ class TestRandomVoice(SmokeBase):
         self.run_async(plugin.inject_voice_hint(event, request))
         self.assertNotIn("[语音工坊]", request.system_prompt)
 
-    def test_split_for_tts_chunks_long_text(self):
-        text = "第一句话需要合成语音。" * 8
-        chunks = MAIN.split_for_tts(text)
-        self.assertGreater(len(chunks), 1)
-        for chunk in chunks:
-            self.assertLessEqual(len(chunk), 30)
-        self.assertIn("第一句话需要合成语音。", "".join(chunks))
-
     def test_concat_wavs(self):
         plugin = make_plugin()
         plugin._tmp_dir().mkdir(parents=True, exist_ok=True)
@@ -1730,7 +1722,7 @@ class TestRandomVoice(SmokeBase):
         with wave.open(str(joined), "rb") as handle:
             self.assertAlmostEqual(handle.getnframes() / handle.getframerate(), 0.2, places=1)
 
-    def test_long_takeover_synthesizes_in_chunks(self):
+    def test_long_takeover_synthesizes_whole_text(self):
         plugin = make_plugin()
         plugin.save_settings_payload(
             {"randomVoiceEnabled": True, "randomVoiceTakeover": True}
@@ -1749,7 +1741,7 @@ class TestRandomVoice(SmokeBase):
 
         with mock.patch.object(MAIN.VoiceStudioPlugin, "synthesize_to_file", side_effect=fake_synthesize):
             self.run_async(plugin._maybe_random_voice(event))
-        self.assertGreater(len(calls), 1)
+        self.assertEqual(calls, [text])
         self.assertIsInstance(result.chain[0], MAIN.Record)
 
     def test_random_voice_skips_singing_reply(self):
