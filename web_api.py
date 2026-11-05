@@ -439,7 +439,7 @@ class StudioWebAPI:
                 mp3_path = tmp_dir / f"preview_{uuid.uuid4().hex[:8]}.mp3"
                 ok = await audio.run_ffmpeg(
                     ["-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
-                     "-t", "30", "-ac", "1", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "32k",
+                     "-t", "30", "-ac", "1", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "48k",
                      str(mp3_path)]
                 )
                 if ok and mp3_path.is_file() and mp3_path.stat().st_size > 0:
