@@ -458,6 +458,32 @@ async function refreshVoices() {
   renderVoices();
 }
 
+async function saveRandomVoice() {
+  const button = $("random-voice-save");
+  if (button) button.disabled = true;
+  setStatus("random-voice-status", "保存中…");
+  try {
+    const payload = {
+      settings: {
+        randomVoiceEnabled: $("random-voice-enabled").value === "true",
+        randomVoiceProbability: Number($("random-voice-probability").value),
+        randomVoiceMaxChars: Number($("random-voice-max-chars").value),
+      },
+    };
+    const result = await bridge.apiPost("settings", payload);
+    if (result && result.settings) {
+      state.settings.randomVoiceEnabled = Boolean(result.settings.randomVoiceEnabled);
+      state.settings.randomVoiceProbability = result.settings.randomVoiceProbability;
+      state.settings.randomVoiceMaxChars = result.settings.randomVoiceMaxChars;
+    }
+    setStatus("random-voice-status", "已保存", "ok");
+  } catch (error) {
+    setStatus("random-voice-status", "保存失败：" + errorText(error), "err");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function saveSettings() {
   const button = $("save-settings");
   button.disabled = true;
@@ -618,6 +644,11 @@ function bindEvents() {
   });
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
+  on("random-voice-save", saveRandomVoice);
+  ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars"].forEach(function (id) {
+    const node = $(id);
+    if (node) node.addEventListener("change", saveRandomVoice);
+  });
 }
 
 function applyContext(context) {

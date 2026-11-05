@@ -151,6 +151,11 @@ input[readonly] {
   opacity: 0.75;
 }
 
+.hint-inline {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
 .btn {
   padding: 7px 14px;
   color: var(--text);
@@ -351,7 +356,9 @@ audio {
             <input id="random-voice-max-chars" type="number" min="10" max="500" step="1" />
           </label>
         </div>
-        <div class="row">
+        <div class="row wrap">
+          <button class="btn primary" id="random-voice-save" type="button">保存</button>
+          <span class="hint-inline">修改后会自动保存</span>
           <span class="status" id="random-voice-status"></span>
         </div>
       </section>
@@ -859,6 +866,32 @@ async function refreshVoices() {
   renderVoices();
 }
 
+async function saveRandomVoice() {
+  const button = $("random-voice-save");
+  if (button) button.disabled = true;
+  setStatus("random-voice-status", "保存中…");
+  try {
+    const payload = {
+      settings: {
+        randomVoiceEnabled: $("random-voice-enabled").value === "true",
+        randomVoiceProbability: Number($("random-voice-probability").value),
+        randomVoiceMaxChars: Number($("random-voice-max-chars").value),
+      },
+    };
+    const result = await bridge.apiPost("settings", payload);
+    if (result && result.settings) {
+      state.settings.randomVoiceEnabled = Boolean(result.settings.randomVoiceEnabled);
+      state.settings.randomVoiceProbability = result.settings.randomVoiceProbability;
+      state.settings.randomVoiceMaxChars = result.settings.randomVoiceMaxChars;
+    }
+    setStatus("random-voice-status", "已保存", "ok");
+  } catch (error) {
+    setStatus("random-voice-status", "保存失败：" + errorText(error), "err");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function saveSettings() {
   const button = $("save-settings");
   button.disabled = true;
@@ -1019,6 +1052,11 @@ function bindEvents() {
   });
   on("tts-test", testTts);
   on("worker-refresh-models", refreshWorkerModels);
+  on("random-voice-save", saveRandomVoice);
+  ["random-voice-enabled", "random-voice-probability", "random-voice-max-chars"].forEach(function (id) {
+    const node = $(id);
+    if (node) node.addEventListener("change", saveRandomVoice);
+  });
 }
 
 function applyContext(context) {
