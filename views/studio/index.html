@@ -1010,8 +1010,31 @@ async function preview() {
       voice: $("preview-voice").value || null,
       emotion: $("preview-emotion").value || "auto",
     };
-    const result = await bridge.apiPost("test", payload);
-    if (!result || !result.data) throw new Error("后端没有返回音频数据（返回字段：" + Object.keys(result || {}).join(",") + "；请缩短文本后重试）");
+    let result = await bridge.apiPost("test", payload);
+    if (typeof result === "string") {
+      const raw = result;
+      try {
+        result = JSON.parse(raw);
+      } catch (error) {
+        if (raw.length > 64 && /^[A-Za-z0-9+/=\s]+$/.test(raw)) {
+          result = { data: raw.replace(/\s+/g, ""), mime: "audio/mpeg" };
+        } else {
+          throw new Error("后端返回了非 JSON 字符串（前 120 字符）：" + raw.slice(0, 120));
+        }
+      }
+    }
+    if (result && typeof result === "object" && typeof result.data === "string" && result.data.trim().startsWith("{")) {
+      try {
+        const nested = JSON.parse(result.data);
+        if (nested && nested.data) result = nested;
+      } catch (error) {
+        /* keep original */
+      }
+    }
+    if (!result || !result.data) {
+      const shape = result === null || result === undefined ? String(result) : typeof result;
+      throw new Error("后端没有返回音频数据（结果类型：" + shape + "；请缩短文本后重试）");
+    }
     $("preview-audio").src = "data:" + (result.mime || "audio/wav") + ";base64," + result.data;
     setStatus(
       "preview-status",
@@ -1047,9 +1070,9 @@ function bindEvents() {
       workerProcess(node.dataset.process, node.dataset.action);
     });
   });
-  $("preview-btn").addEventListener("click", preview);
-  $("tts-test").addEventListener("click", testTts);
-  $("worker-refresh-models").addEventListener("click", refreshWorkerModels);
+  on("preview-btn", preview);
+  on("tts-test", testTts);
+  on("worker-refresh-models", refreshWorkerModels);
 }
 
 function applyContext(context) {

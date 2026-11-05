@@ -292,7 +292,7 @@ function renderWorkerFields() {
 
 async function refreshWorkerModels() {
   const button = $("worker-refresh-models");
-  button.disabled = true;
+  if (button) button.disabled = true;
   setStatus("worker-models-status", "获取中…");
   try {
     const result = await bridge.apiGet("worker/models");
@@ -310,7 +310,7 @@ async function refreshWorkerModels() {
   } catch (error) {
     setStatus("worker-models-status", "翻唱 worker 获取模型失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -415,7 +415,7 @@ async function testTts() {
   } catch (error) {
     setStatus("tts-status", "语音合成连接失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -481,7 +481,7 @@ async function saveSettings() {
   } catch (error) {
     setStatus("save-status", "保存失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -504,7 +504,7 @@ async function uploadVoice() {
   } catch (error) {
     setStatus("voice-status", "上传失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -528,7 +528,7 @@ async function importVoice() {
   } catch (error) {
     setStatus("voice-status", "导入失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -576,7 +576,7 @@ async function testWorker() {
   } catch (error) {
     setStatus("worker-status", "翻唱 worker 连接失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -597,8 +597,8 @@ async function workerProcess(process, action) {
 
 async function preview() {
   const text = $("preview-text").value.trim();
-  if (text.length > 20) {
-    setStatus("preview-status", "语音合成试听：文本请控制在 20 字以内", "err");
+  if (text.length > 10) {
+    setStatus("preview-status", "语音合成试听：文本请控制在 10 字以内", "err");
     return;
   }
   if (!text) {
@@ -615,8 +615,31 @@ async function preview() {
       voice: $("preview-voice").value || null,
       emotion: $("preview-emotion").value || "auto",
     };
-    const result = await bridge.apiPost("test", payload);
-    if (!result || !result.data) throw new Error("后端没有返回音频数据（返回字段：" + Object.keys(result || {}).join(",") + "；请缩短文本后重试）");
+    let result = await bridge.apiPost("test", payload);
+    if (typeof result === "string") {
+      const raw = result;
+      try {
+        result = JSON.parse(raw);
+      } catch (error) {
+        if (raw.length > 64 && /^[A-Za-z0-9+/=\s]+$/.test(raw)) {
+          result = { data: raw.replace(/\s+/g, ""), mime: "audio/mpeg" };
+        } else {
+          throw new Error("后端返回了非 JSON 字符串（前 120 字符）：" + raw.slice(0, 120));
+        }
+      }
+    }
+    if (result && typeof result === "object" && typeof result.data === "string" && result.data.trim().startsWith("{")) {
+      try {
+        const nested = JSON.parse(result.data);
+        if (nested && nested.data) result = nested;
+      } catch (error) {
+        /* keep original */
+      }
+    }
+    if (!result || !result.data) {
+      const shape = result === null || result === undefined ? String(result) : typeof result;
+      throw new Error("后端没有返回音频数据（结果类型：" + shape + "；请缩短文本后重试）");
+    }
     $("preview-audio").src = "data:" + (result.mime || "audio/wav") + ";base64," + result.data;
     setStatus(
       "preview-status",
@@ -628,8 +651,13 @@ async function preview() {
   } catch (error) {
     setStatus("preview-status", "语音合成试听失败：" + errorText(error), "err");
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
+}
+
+function on(id, handler) {
+  const node = $(id);
+  if (node) node.addEventListener("click", handler);
 }
 
 function bindEvents() {
@@ -647,9 +675,9 @@ function bindEvents() {
       workerProcess(node.dataset.process, node.dataset.action);
     });
   });
-  $("preview-btn").addEventListener("click", preview);
-  $("tts-test").addEventListener("click", testTts);
-  $("worker-refresh-models").addEventListener("click", refreshWorkerModels);
+  on("preview-btn", preview);
+  on("tts-test", testTts);
+  on("worker-refresh-models", refreshWorkerModels);
 }
 
 function applyContext(context) {
