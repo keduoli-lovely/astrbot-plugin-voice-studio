@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import wave
 import shutil
 import time
 import uuid
@@ -63,6 +64,32 @@ from .voice_store import VoiceStore
 from .web_api import StudioWebAPI
 
 _COMMAND_NAMES = ("语音状态", "音色导入", "音色删除", "语音说", "朗读", "音色", "翻唱")
+
+_TTS_CHUNK_LIMIT = 30
+_TTS_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
+
+
+def split_for_tts(text: str, limit: int = _TTS_CHUNK_LIMIT) -> list[str]:
+    """把长文本按句切成小块，避免 IndexTTS 长输入卡死。"""
+
+    pieces = [piece.strip() for piece in _TTS_SENTENCE_SPLIT.split(str(text or "")) if piece.strip()]
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        if len(piece) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            for start in range(0, len(piece), limit):
+                chunks.append(piece[start:start + limit])
+            continue
+        if len(current) + len(piece) > limit and current:
+            chunks.append(current)
+            current = ""
+        current += piece
+    if current:
+        chunks.append(current)
+    return chunks or ([str(text).strip()] if str(text).strip() else [])
 
 _READ_OPTION_RE = re.compile(
     r"^\s*-(?P<flag>[vVeEiIpPsS])(?:\s+|:)(?P<value>\"[^\"]*\"|'[^']*'|\S+)\s*"
@@ -677,19 +704,34 @@ class VoiceStudioPlugin(Star):
         emotion = str(settings.get("defaultEmotion") or "auto")
         if not supports_emotion or emotion in ("", "auto"):
             emotion = None
+        chunks = split_for_tts(text)
+        wav_parts: list[Path] = []
         try:
-            audio_result = await self.synthesize_to_file(
-                text,
-                provider=None,
-                voice=str(settings.get("defaultVoice") or "") or None,
-                emotion=emotion,
-                intensity=float(settings.get("emotionIntensity") or 0.6),
-            )
-            audio_path = await audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir())
+            for index, chunk in enumerate(chunks):
+                audio_result = await asyncio.wait_for(
+                    self.synthesize_to_file(
+                        chunk,
+                        provider=None,
+                        voice=str(settings.get("defaultVoice") or "") or None,
+                        emotion=emotion,
+                        intensity=float(settings.get("emotionIntensity") or 0.6),
+                    ),
+                    timeout=60.0,
+                )
+                part = await asyncio.wait_for(
+                    audio.ensure_wav(Path(audio_result["path"]), self._tmp_dir()),
+                    timeout=30.0,
+                )
+                wav_parts.append(Path(part))
+                logger.info("[%s] 语音工坊分段 %s/%s 完成（%s 字）", PLUGIN_NAME, index + 1, len(chunks), len(chunk))
+            audio_path = self._concat_wavs(wav_parts)
+        except asyncio.TimeoutError:
+            logger.warning("[%s] 语音工坊合成超时，回退官方 TTS", PLUGIN_NAME)
+            return
         except Exception:  # noqa: BLE001 - 失败时保留原结果，交给官方 TTS 兜底
             logger.exception("[%s] 语音工坊接管失败，回退官方 TTS", PLUGIN_NAME)
             return
-        logger.info("[%s] 语音工坊接管回复为语音：%s 字", PLUGIN_NAME, len(text))
+        logger.info("[%s] 语音工坊接管回复为语音：%s 字，%s 段", PLUGIN_NAME, len(text), len(chunks))
         result.chain = [_record_for(audio_path)]
 
     # -- 命令：/朗读 --------------------------------------------------------
@@ -741,6 +783,25 @@ class VoiceStudioPlugin(Star):
         except Exception as exc:  # noqa: BLE001 - 兜底，不让插件崩
             logger.exception("[%s] /朗读 未预期错误", PLUGIN_NAME)
             yield event.plain_result(f"❌ 朗读失败：{exc.__class__.__name__}: {exc}")
+
+    def _concat_wavs(self, paths: list[Path]) -> Path:
+        """把多段 wav 顺序拼接成一个 wav（用于长文本分段合成）。"""
+
+        if not paths:
+            raise VoiceStudioError("没有可拼接的音频")
+        if len(paths) == 1:
+            return Path(paths[0])
+        dest = self._tmp_dir() / f"voice_studio_join_{uuid.uuid4().hex[:8]}.wav"
+        with wave.open(str(paths[0]), "rb") as first:
+            params = first.getparams()
+            frames = first.readframes(first.getnframes())
+        with wave.open(str(dest), "wb") as out:
+            out.setparams(params)
+            out.writeframes(frames)
+            for path in paths[1:]:
+                with wave.open(str(path), "rb") as part:
+                    out.writeframes(part.readframes(part.getnframes()))
+        return dest
 
     @staticmethod
     def _read_usage() -> str:

@@ -1691,6 +1691,45 @@ class TestRandomVoice(SmokeBase):
         self.run_async(plugin.inject_voice_hint(event, request))
         self.assertNotIn("[语音工坊]", request.system_prompt)
 
+    def test_split_for_tts_chunks_long_text(self):
+        text = "第一句话需要合成语音。" * 8
+        chunks = MAIN.split_for_tts(text)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 30)
+        self.assertIn("第一句话需要合成语音。", "".join(chunks))
+
+    def test_concat_wavs(self):
+        plugin = make_plugin()
+        plugin._tmp_dir().mkdir(parents=True, exist_ok=True)
+        first = write_wav(plugin._tmp_dir() / "a.wav", seconds=0.1)
+        second = write_wav(plugin._tmp_dir() / "b.wav", seconds=0.1)
+        joined = plugin._concat_wavs([first, second])
+        with wave.open(str(joined), "rb") as handle:
+            self.assertAlmostEqual(handle.getnframes() / handle.getframerate(), 0.2, places=1)
+
+    def test_long_takeover_synthesizes_in_chunks(self):
+        plugin = make_plugin()
+        plugin.save_settings_payload(
+            {"randomVoiceEnabled": True, "randomVoiceTakeover": True}
+        )
+        plugin._tmp_dir().mkdir(parents=True, exist_ok=True)
+        text = "这一句话比较长需要切分成多段来合成。" * 4
+        result = types.SimpleNamespace(chain=[FakePlain(text)])
+        event = FakeEvent("hi", result=result)
+        calls = []
+
+        async def fake_synthesize(chunk, **kwargs):
+            calls.append(chunk)
+            dest = plugin._tmp_dir() / ("chunk_%s.wav" % len(calls))
+            write_wav(dest, channels=1, sample_rate=22050, seconds=0.1, freq=440, amp=0.2)
+            return {"path": dest, "format": "wav"}
+
+        with mock.patch.object(MAIN.VoiceStudioPlugin, "synthesize_to_file", side_effect=fake_synthesize):
+            self.run_async(plugin._maybe_random_voice(event))
+        self.assertGreater(len(calls), 1)
+        self.assertIsInstance(result.chain[0], MAIN.Record)
+
 def main():
     unittest.main(verbosity=2)
 
