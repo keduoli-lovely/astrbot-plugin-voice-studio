@@ -1574,7 +1574,7 @@ class TestRandomVoice(SmokeBase):
         merged = SETTINGS_MOD.merge_settings({}, {})
         self.assertFalse(merged["randomVoiceEnabled"])
         self.assertAlmostEqual(merged["randomVoiceProbability"], 0.15)
-        self.assertEqual(merged["randomVoiceMaxChars"], 80)
+        self.assertEqual(merged["randomVoiceMaxChars"], 300)
 
     def test_random_voice_replaces_plain_text_reply(self):
         plugin = make_plugin()

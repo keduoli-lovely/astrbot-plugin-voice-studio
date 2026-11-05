@@ -336,10 +336,10 @@ def merge_settings(stored: dict | None, astrbot_config: object) -> dict:
         random_voice_max_chars = int(
             stored.get("randomVoiceMaxChars")
             if "randomVoiceMaxChars" in stored
-            else conf_int(config, "randomVoiceMaxChars", 80)
+            else conf_int(config, "randomVoiceMaxChars", 300)
         )
     except (TypeError, ValueError):
-        random_voice_max_chars = 80
+        random_voice_max_chars = 300
     random_voice_max_chars = max(10, min(500, random_voice_max_chars))
     random_voice_takeover = (
         bool(stored.get("randomVoiceTakeover"))

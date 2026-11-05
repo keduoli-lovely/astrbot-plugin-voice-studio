@@ -574,10 +574,23 @@ class VoiceStudioPlugin(Star):
     # -- 钩子：随机语音回复 ------------------------------------------------
     @filter.on_decorating_result()
     async def random_voice_hook(self, event: AstrMessageEvent):
-        """开启随机语音后，在纯文本回复前随机改用语音条（命令/唱歌不走随机）。"""
+        """开启随机语音后，优先用语音工坊接管回复（失败回退官方 TTS）。"""
 
         try:
-            await self._maybe_random_voice(event)
+            settings = self.merged_settings()
+            chain = None
+            result = event.get_result()
+            if result is not None:
+                chain = getattr(result, "chain", None)
+            if settings.get("randomVoiceEnabled"):
+                logger.info(
+                    "[%s] 随机语音钩子：chain=%s captured=%s takeover=%s",
+                    PLUGIN_NAME,
+                    [type(item).__name__ for item in (chain or [])],
+                    len(str(getattr(event, "_voice_studio_llm_text", "") or "")),
+                    bool(settings.get("randomVoiceTakeover", True)),
+                )
+            await self._maybe_random_voice(event, settings)
         except Exception:  # noqa: BLE001 - 不让钩子影响正常回复
             logger.exception("[%s] 随机语音回复失败", PLUGIN_NAME)
 
@@ -594,8 +607,8 @@ class VoiceStudioPlugin(Star):
         except Exception:  # noqa: BLE001
             pass
 
-    async def _maybe_random_voice(self, event: AstrMessageEvent) -> None:
-        settings = self.merged_settings()
+    async def _maybe_random_voice(self, event: AstrMessageEvent, settings: dict | None = None) -> None:
+        settings = settings if settings is not None else self.merged_settings()
         if not bool(settings.get("randomVoiceEnabled")):
             return
         if self._check_allowed(event):
@@ -627,9 +640,11 @@ class VoiceStudioPlugin(Star):
         if not text and takeover and captured:
             text = captured
         if not text:
+            logger.info("[%s] 随机语音跳过：没有可用文本（chain=%s captured=%s）", PLUGIN_NAME, bool(chain), len(captured))
             return
-        limit = int(settings.get("randomVoiceMaxChars") or 80)
+        limit = int(settings.get("randomVoiceMaxChars") or 300)
         if len(text) < 2 or len(text) > limit:
+            logger.info("[%s] 随机语音跳过：文本长度 %s 不在 2~%s 内", PLUGIN_NAME, len(text), limit)
             return
         if not takeover:
             probability = float(settings.get("randomVoiceProbability") or 0.0)

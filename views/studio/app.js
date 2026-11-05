@@ -117,7 +117,7 @@ const state = {
     ttsSpeed: 1.0,
     randomVoiceEnabled: false,
     randomVoiceProbability: 0.15,
-    randomVoiceMaxChars: 80,
+    randomVoiceMaxChars: 300,
     randomVoiceTakeover: true,
   },
   providers: {},
@@ -276,7 +276,7 @@ function fillCommonFields() {
   $("default-voice").value = state.settings.defaultVoice || "";
   $("random-voice-enabled").value = state.settings.randomVoiceEnabled ? "true" : "false";
   $("random-voice-probability").value = String(state.settings.randomVoiceProbability ?? 0.15);
-  $("random-voice-max-chars").value = String(state.settings.randomVoiceMaxChars ?? 80);
+  $("random-voice-max-chars").value = String(state.settings.randomVoiceMaxChars ?? 300);
   $("random-voice-takeover").value = state.settings.randomVoiceTakeover === false ? "false" : "true";
   updateEmotionVisibility();
 }
