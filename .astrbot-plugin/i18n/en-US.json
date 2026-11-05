@@ -4,5 +4,11 @@
       "title": "Voice Studio",
       "description": "Configure TTS providers, the reference voice library, the RVC worker, and preview speech."
     }
+  },
+  "pages": {
+    "studio": {
+      "title": "Voice Studio",
+      "description": "Configure TTS providers, the reference voice library, the RVC worker, and preview speech."
+    }
   }
 }

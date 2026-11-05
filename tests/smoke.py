@@ -1475,8 +1475,8 @@ class TestViews(SmokeBase):
         self.assertTrue(js_path.is_file(), "缺少 views/studio/app.js")
         self.assertTrue(css_path.is_file(), "缺少 views/studio/style.css")
         html = html_path.read_text(encoding="utf-8")
-        self.assertIn("./app.js", html)
-        self.assertIn("./style.css", html)
+        self.assertIn("AstrBotPluginView", html)
+        self.assertIn("<style>", html)
         for element_id in ("provider-select", "provider-fields", "voice-list", "worker-fields", "preview-audio"):
             self.assertIn(f'id="{element_id}"', html)
 
